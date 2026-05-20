@@ -77,15 +77,52 @@ COMMANDS
       Example:
           python pyvoog.py status
 
-  push [FILE ...] [--dry-run]
+  push [FILE ...] [--dry-run] [--force] [--create]
       Push locally modified layouts and text assets (CSS/JS) to the server.
       Only files tracked in manifest.json are eligible — developer files are
       ignored automatically. Detects server-side conflicts before uploading.
+
+      Use --force to skip the conflict check and push even when the server
+      has a newer timestamp (your local content will overwrite the server).
+
+      Use --create to upload files that don't yet exist on the server
+      (and are therefore not in manifest.json). The file is created on the
+      server and the manifest is updated automatically.
 
       Examples:
           python pyvoog.py push
           python pyvoog.py push layouts/page.tpl stylesheets/main.css
           python pyvoog.py push --dry-run
+          python pyvoog.py push --force
+          python pyvoog.py push stylesheets/newfile.css --create
+          python pyvoog.py push layouts/blog.tpl --create
+
+  new FILE [--type TYPE] [--dry-run]
+      Create a new layout or asset on the Voog server from a local file.
+      The file must exist locally. Type is inferred from the directory:
+        layouts/    → layout (content_type=page)
+        components/ → component
+        stylesheets/, javascripts/, images/, assets/ → asset
+
+      Examples:
+          python pyvoog.py new layouts/blog.tpl
+          python pyvoog.py new components/sidebar.tpl
+          python pyvoog.py new stylesheets/custom.css
+          python pyvoog.py new layouts/blog.tpl --type blog
+
+  new --all [--dry-run]
+      Find all local files not on the server and create them.
+      Shows the list and asks for confirmation before proceeding.
+
+      Examples:
+          python pyvoog.py new --all
+          python pyvoog.py new --all --dry-run
+
+  new --list
+      List local files that are not yet on the server.
+
+      Example:
+          python pyvoog.py new --list
 
   watch (not yet implemented)
       Watch local files for changes and push automatically.
@@ -171,6 +208,28 @@ Show site info: host, manifest summary, and last git commit.
 
 Example:
     python pyvoog.py status
+""",
+    "new": """\
+pyvoog new FILE [--type TYPE] [--dry-run]
+pyvoog new --all [--dry-run]
+
+Create new layouts or assets on the Voog server from local files.
+
+Single file:
+    python pyvoog.py new layouts/blog.tpl
+    python pyvoog.py new components/sidebar.tpl
+    python pyvoog.py new stylesheets/custom.css
+    python pyvoog.py new layouts/blog.tpl --type blog
+
+All new files:
+    python pyvoog.py new --all
+    python pyvoog.py new --all --dry-run
+
+List new files (no action):
+    python pyvoog.py new --list
+
+Type is inferred from the directory (layouts → page, components → component).
+Use --type to override for special layouts (blog, blog_article, etc.).
 """,
 }
 
@@ -298,19 +357,85 @@ def cmd_push(args, out, config, site_dir):
 
     files   = args.files or None   # [] from argparse → treat as None (auto-detect)
     dry_run = args.dry_run
+    force   = args.force
+    create  = args.create
 
     if dry_run:
         out.info("(dry-run mode — nothing will be uploaded)\n")
+    if force:
+        out.info("(--force: conflict check skipped)\n")
+    if create:
+        out.info("(--create: new files will be created on server)\n")
 
     succeeded, failed = push(
         api=api,
         site_dir=site_dir,
         files=files if files else None,
         dry_run=dry_run,
+        force=force,
+        create=create,
         out=out,
     )
 
     return 1 if failed else 0
+
+
+def cmd_new(args, out, config, site_dir):
+    from pyvoog.new_cmd import new_single, new_all, list_new
+    from pyvoog import git
+
+    api = VoogAPI(config, output=out)
+    dry_run = args.dry_run
+
+    if args.list:
+        list_new(api, site_dir, out=out)
+        return 0
+
+    if dry_run:
+        out.info("(dry-run mode — nothing will be created)\n")
+
+    if args.all:
+        succeeded, failed = new_all(api, site_dir, dry_run=dry_run, out=out)
+        if not dry_run and succeeded:
+            out.info(f"\nCreated {len(succeeded)} file(s) on server.")
+            if git.git_available():
+                try:
+                    git.ensure_repo(site_dir)
+                    commit_paths = list(succeeded) + ["manifest.json"]
+                    committed = git.commit_files(
+                        site_dir,
+                        commit_paths,
+                        f"pyvoog new --all: {len(succeeded)} file(s) created",
+                    )
+                    if committed:
+                        out.info("Committed to git.")
+                except RuntimeError as exc:
+                    out.warn(f"Git error: {exc}")
+        if failed:
+            out.info(f"{len(failed)} file(s) failed.")
+        return 1 if failed else 0
+    else:
+        if not args.file:
+            out.error("Specify a file path or use --all.\nExample: pyvoog new layouts/blog.tpl")
+            return 1
+        ok = new_single(
+            api, site_dir, args.file,
+            content_type_override=args.type,
+            dry_run=dry_run, out=out,
+        )
+        if ok and not dry_run and git.git_available():
+            try:
+                git.ensure_repo(site_dir)
+                committed = git.commit_files(
+                    site_dir,
+                    [args.file, "manifest.json"],
+                    f"pyvoog new: {args.file}",
+                )
+                if committed:
+                    out.info("Committed to git.")
+            except RuntimeError as exc:
+                out.warn(f"Git error: {exc}")
+        return 0 if ok else 1
 
 
 def cmd_watch(args, out, config, site_dir):
@@ -397,6 +522,39 @@ def build_parser():
     p_push.add_argument(
         "--dry-run", action="store_true",
         help="Show what would be pushed without uploading",
+    )
+    p_push.add_argument(
+        "--force", action="store_true",
+        help="Skip conflict check and overwrite server even when its timestamp is newer",
+    )
+    p_push.add_argument(
+        "--create", action="store_true",
+        help="Create files that don't exist on the server (not yet in manifest)",
+    )
+
+    # new
+    p_new = sub.add_parser("new", help="Create new layouts/assets on the server from local files")
+    p_new.add_argument(
+        "file", nargs="?", default=None, metavar="FILE",
+        help="Local file path to create on server (e.g. layouts/blog.tpl)",
+    )
+    p_new.add_argument(
+        "--all", action="store_true",
+        help="Find and create all local files not on the server",
+    )
+    p_new.add_argument(
+        "--list", action="store_true",
+        help="List local files not yet on the server",
+    )
+    p_new.add_argument(
+        "--type", metavar="TYPE",
+        choices=["page", "blog", "blog_article", "elements", "element",
+                 "product", "error_401", "error_404"],
+        help="Override content_type for layouts (default: page)",
+    )
+    p_new.add_argument(
+        "--dry-run", action="store_true",
+        help="Show what would be created without creating",
     )
 
     # watch (stub)
@@ -489,6 +647,7 @@ def main():
         "manifest": lambda: cmd_manifest(args, out, config, site_dir),
         "status":   lambda: cmd_status(args, out, config, site_dir),
         "push":     lambda: cmd_push(args, out, config, site_dir),
+        "new":      lambda: cmd_new(args, out, config, site_dir),
         "watch":    lambda: cmd_watch(args, out, config, site_dir),
     }
 

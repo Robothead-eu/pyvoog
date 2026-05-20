@@ -20,6 +20,7 @@ Manage Voog CMS site templates and design assets directly via the REST API.
 - **Conflict detection** — push warns when the server has changed since your last pull
 - **Manifest-scoped git** — only Voog-tracked files are committed; developer files are ignored
 - `pyvoog check` compares local files against the server without changing anything
+- `pyvoog new` creates new layouts/assets on the server from local files
 - `pyvoog manifest` inspects the remote file structure
 - Partial pulls: `pyvoog pull layouts` or `pyvoog pull assets`
 - Dry-run mode for both pull and push
@@ -138,7 +139,6 @@ pyvoog push --dry-run                    # see what would be pushed
 
 **Not supported (yet):**
 - Binary assets (images, fonts) — these must be uploaded via the Voog editor
-- Creating new files on the server — create them in Voog first, then `pyvoog pull`
 
 ---
 
@@ -188,6 +188,40 @@ pyvoog help
 pyvoog help pull
 pyvoog help push
 ```
+
+---
+
+### `pyvoog new FILE [--type TYPE] [--dry-run]`
+
+Create new layouts or assets on the Voog server from local files.
+The file must already exist locally.
+
+```bash
+pyvoog new layouts/blog.tpl              # create a new layout (defaults to content_type=page)
+pyvoog new components/sidebar.tpl        # create a new component
+pyvoog new stylesheets/custom.css        # create a new CSS asset
+pyvoog new layouts/blog.tpl --type blog  # override content_type for special layouts
+```
+
+#### Create all new files at once
+
+```bash
+pyvoog new --all                         # find all local-only files, confirm, then create
+pyvoog new --all --dry-run               # preview what would be created
+```
+
+#### List new files
+
+```bash
+pyvoog new --list                        # list local files not yet on the server
+```
+
+**How it works:**
+1. File type is inferred from the directory (`layouts/` → page layout, `components/` → component, `stylesheets/` → CSS asset, etc.)
+2. For `--all`: fetches server state, compares against local files, shows the list, and asks for `y/N` confirmation
+3. Creates via POST to the Voog API
+4. Updates `manifest.json` with new server IDs and timestamps
+5. Auto-commits to git
 
 ---
 

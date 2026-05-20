@@ -204,3 +204,122 @@ class VoogAPI:
     def download_url(self, url):
         """Download binary content from a public URL (no auth needed)."""
         return self._download(url)
+
+    # ------------------------------------------------------------------
+    # Create (POST)
+    # ------------------------------------------------------------------
+
+    def create_layout(self, title, content_type, body, component=False, layout_name=None):
+        """
+        Create a new layout on the server via POST.
+        Returns the created layout dict (includes id, updated_at, etc.).
+        """
+        data = {
+            "title": title,
+            "content_type": content_type,
+            "component": component,
+            "body": body,
+        }
+        if layout_name:
+            data["layout_name"] = layout_name
+        return self._post("/admin/api/layouts", data)
+
+    def create_layout_asset(self, filename, data=None, file_bytes=None, content_type=None):
+        """
+        Create a new layout asset on the server via POST.
+
+        For text assets (CSS/JS): pass data= with file content string.
+        For binary assets (images/fonts): pass file_bytes= with raw bytes.
+
+        Returns the created asset dict.
+        """
+        if file_bytes is not None:
+            return self._post_multipart(
+                "/admin/api/layout_assets",
+                fields={"filename": filename},
+                file_field="file",
+                file_name=filename,
+                file_bytes=file_bytes,
+                file_content_type=content_type or "application/octet-stream",
+            )
+        payload = {"filename": filename}
+        if data is not None:
+            payload["data"] = data
+        if content_type:
+            payload["content_type"] = content_type
+        return self._post("/admin/api/layout_assets", payload)
+
+    def _post(self, path, data, _retry=1):
+        """Perform an authenticated POST request with a JSON body."""
+        url = f"{self._config.base_url}{path}"
+        self._log(f"POST {url}")
+        payload = json.dumps(data).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "X-API-Token": self._config.api_token,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            self._handle_http_error(exc, url)
+        except urllib.error.URLError as exc:
+            if _retry > 0:
+                self._log(f"Network error ({exc.reason}), retrying in 2s…")
+                time.sleep(2)
+                return self._post(path, data, _retry=_retry - 1)
+            raise APIError(f"Network error: {exc.reason}")
+
+    def _post_multipart(self, path, fields, file_field, file_name, file_bytes,
+                        file_content_type="application/octet-stream", _retry=1):
+        """Perform an authenticated multipart/form-data POST (for binary uploads)."""
+        import os
+        boundary = f"----pyvoog-{os.urandom(16).hex()}"
+        body_parts = []
+        for key, val in fields.items():
+            body_parts.append(
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                f"{val}\r\n"
+            )
+        body_parts.append(
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{file_field}"; filename="{file_name}"\r\n'
+            f"Content-Type: {file_content_type}\r\n\r\n"
+        )
+        payload = b""
+        for part in body_parts:
+            payload += part.encode("utf-8")
+        payload += file_bytes
+        payload += f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+        url = f"{self._config.base_url}{path}"
+        self._log(f"POST {url} (multipart)")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "X-API-Token": self._config.api_token,
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            self._handle_http_error(exc, url)
+        except urllib.error.URLError as exc:
+            if _retry > 0:
+                self._log(f"Network error ({exc.reason}), retrying in 2s…")
+                time.sleep(2)
+                return self._post_multipart(
+                    path, fields, file_field, file_name, file_bytes,
+                    file_content_type, _retry=_retry - 1,
+                )
+            raise APIError(f"Network error: {exc.reason}")
