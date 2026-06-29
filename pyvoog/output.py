@@ -30,6 +30,20 @@ class Output:
     def warn(self, msg):
         print(f"  WARN {msg}", file=sys.stderr)
 
+    def attention(self, title, lines=None):
+        """Print a prominent, multi-line warning block to stderr.
+
+        Used for things the user must not miss — e.g. a push conflict where
+        the server changed since the last pull. A single WARN line is too
+        easy to scroll past.
+        """
+        bar = "!" * 64
+        print(f"\n{bar}", file=sys.stderr)
+        print(f"  {title}", file=sys.stderr)
+        for ln in (lines or []):
+            print(f"  {ln}", file=sys.stderr)
+        print(f"{bar}\n", file=sys.stderr)
+
     def error(self, msg):
         print(f"ERROR: {msg}", file=sys.stderr)
 

@@ -7,9 +7,12 @@ The .voog file uses INI-style format (same as the Ruby voog-kit):
     host=site.voog.com
     api_token=abc123
     protocol=https
-    overwrite=true
+    env_name=staging
+    env_peer_name=production
+    env_peer_path=
 
-Multiple sections = multiple sites; use --site to select one.
+One section per file. The env_* fields are optional and used only by the
+experimental env-diff / env-copy commands.
 """
 
 import os
@@ -21,11 +24,15 @@ class ConfigError(Exception):
 
 
 class SiteConfig:
-    def __init__(self, section, host, api_token, protocol="https"):
+    def __init__(self, section, host, api_token, protocol="https",
+                 env_name=None, env_peer_name=None, env_peer_path=None):
         self.section = section
         self.host = host
         self.api_token = api_token
         self.protocol = protocol
+        self.env_name = env_name            # friendly name for this environment
+        self.env_peer_name = env_peer_name  # friendly name for the peer environment
+        self.env_peer_path = env_peer_path  # local path to the peer environment
 
     @property
     def base_url(self):
@@ -110,16 +117,41 @@ def load_config(site_dir=None, site_name=None):
         host=host,
         api_token=api_token,
         protocol=cfg.get("protocol", "https"),
+        env_name=cfg.get("env_name", "").strip() or None,
+        env_peer_name=cfg.get("env_peer_name", "").strip() or None,
+        env_peer_path=cfg.get("env_peer_path", "").strip() or None,
     )
 
 
 def write_voog_file(path, host, api_token, protocol="https"):
-    """Write a .voog config file."""
+    """Write a fresh .voog config file with empty env fields as placeholders."""
     content = (
         f"[{host}]\n"
         f"host={host}\n"
         f"api_token={api_token}\n"
         f"protocol={protocol}\n"
+        f"env_name=\n"
+        f"env_peer_name=\n"
+        f"env_peer_path=\n"
     )
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
+
+
+def update_env_config(voog_file, section, env_name, env_peer_name, env_peer_path):
+    """
+    Write env_name, env_peer_name, env_peer_path into a .voog section.
+    Preserves all other fields.
+    """
+    cp = configparser.ConfigParser()
+    cp.read(voog_file, encoding="utf-8")
+
+    if section not in cp:
+        raise ConfigError(f"Section [{section}] not found in {voog_file}")
+
+    cp[section]["env_name"] = env_name or ""
+    cp[section]["env_peer_name"] = env_peer_name or ""
+    cp[section]["env_peer_path"] = env_peer_path or ""
+
+    with open(voog_file, "w", encoding="utf-8") as f:
+        cp.write(f, space_around_delimiters=False)

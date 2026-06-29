@@ -25,6 +25,7 @@ Manage Voog CMS site templates and design assets directly via the REST API.
 - Partial pulls: `pyvoog pull layouts` or `pyvoog pull assets`
 - Dry-run mode for both pull and push
 - Multi-site support via `--site` flag
+- **Experimental:** `pyvoog experimental env-diff` / `env-copy` — compare and sync two local environment copies (e.g. staging → production)
 
 ---
 
@@ -187,6 +188,7 @@ pyvoog status
 pyvoog help
 pyvoog help pull
 pyvoog help push
+pyvoog help experimental
 ```
 
 ---
@@ -225,6 +227,42 @@ pyvoog new --list                        # list local files not yet on the serve
 
 ---
 
+---
+
+## Experimental commands
+
+> **Warning:** These commands write directly to local files without undo. Use `--dry-run` and review the diff before confirming a copy.
+
+### `pyvoog experimental env-setup`
+
+Interactive wizard to configure `env_name`, `env_peer_name`, and `env_peer_path` in `.voog`. Run once per machine.
+
+```bash
+pyvoog experimental env-setup
+```
+
+### `pyvoog experimental env-diff SOURCE TARGET`
+
+Compare manifest-tracked files between two local environment directories. Shows modified, added, removed, and identical files. Does not write anything.
+
+```bash
+pyvoog experimental env-diff staging production
+pyvoog experimental env-diff staging production --verbose
+```
+
+### `pyvoog experimental env-copy SOURCE TARGET [--dry-run]`
+
+Shows the same diff as `env-diff`, then asks for confirmation before copying changed files from SOURCE to TARGET. Does not commit or push.
+
+```bash
+pyvoog experimental env-copy staging production            # review diff, confirm, then copy
+pyvoog experimental env-copy staging production --dry-run  # preview only
+```
+
+For full details: `pyvoog help experimental`
+
+---
+
 ## .voog config format
 
 The `.voog` file is INI-style, compatible with the Ruby voog-kit:
@@ -234,9 +272,22 @@ The `.voog` file is INI-style, compatible with the Ruby voog-kit:
 host=mysite.voog.com
 api_token=your_api_token_here
 protocol=https
+env_name=
+env_peer_name=
+env_peer_path=
 ```
 
 **Never commit `.voog` — it contains your API token.** The `pyvoog init` command adds it to `.gitignore` automatically.
+
+The `env_*` fields are optional and used only by the experimental `env-diff` / `env-copy` commands:
+
+| Field | Purpose |
+|---|---|
+| `env_name` | Friendly name for this environment (e.g. `staging`) |
+| `env_peer_name` | Friendly name for the peer environment (e.g. `production`) |
+| `env_peer_path` | Path to the peer environment's local directory |
+
+Run `pyvoog experimental env-setup` to fill these in interactively.
 
 ### Finding your API token
 
@@ -247,18 +298,24 @@ In the Voog admin panel: **Settings → Integrations → API** (or similar — t
 You can have multiple sections in `.voog` and switch between them with `--site`:
 
 ```ini
-[staging.voog.com]
-host=staging.voog.com
+[staging.mysite.voog.com]
+host=staging.mysite.voog.com
 api_token=token_a
+env_name=staging
+env_peer_name=production
+env_peer_path=C:\path\to\production-site
 
-[production.voog.com]
-host=production.voog.com
+[production.mysite.voog.com]
+host=production.mysite.voog.com
 api_token=token_b
+env_name=production
+env_peer_name=staging
+env_peer_path=C:\path\to\staging-site
 ```
 
 ```bash
-pyvoog pull --site staging.voog.com
-pyvoog pull --site production.voog.com
+pyvoog pull --site staging.mysite.voog.com
+pyvoog pull --site production.mysite.voog.com
 ```
 
 ---

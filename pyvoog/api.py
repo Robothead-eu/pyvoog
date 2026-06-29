@@ -201,6 +201,20 @@ class VoogAPI:
         """
         return self._put(f"/admin/api/layout_assets/{asset_id}", {"data": data})
 
+    def update_layout_asset_binary(self, asset_id, filename, file_bytes, content_type=None):
+        """
+        Push new binary content to a layout asset (image/font/SVG) via multipart PUT.
+        Returns the updated asset dict from the server.
+        """
+        return self._put_multipart(
+            f"/admin/api/layout_assets/{asset_id}",
+            fields={},
+            file_field="file",
+            file_name=filename,
+            file_bytes=file_bytes,
+            file_content_type=content_type or "application/octet-stream",
+        )
+
     def download_url(self, url):
         """Download binary content from a public URL (no auth needed)."""
         return self._download(url)
@@ -275,28 +289,31 @@ class VoogAPI:
                 return self._post(path, data, _retry=_retry - 1)
             raise APIError(f"Network error: {exc.reason}")
 
+    def _build_multipart(self, boundary, fields, file_field, file_name, file_bytes, file_content_type):
+        """Assemble a multipart/form-data body."""
+        parts = []
+        for key, val in fields.items():
+            parts.append(
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                f"{val}\r\n"
+            )
+        parts.append(
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{file_field}"; filename="{file_name}"\r\n'
+            f"Content-Type: {file_content_type}\r\n\r\n"
+        )
+        payload = b"".join(p.encode("utf-8") for p in parts)
+        payload += file_bytes
+        payload += f"\r\n--{boundary}--\r\n".encode("utf-8")
+        return payload
+
     def _post_multipart(self, path, fields, file_field, file_name, file_bytes,
                         file_content_type="application/octet-stream", _retry=1):
         """Perform an authenticated multipart/form-data POST (for binary uploads)."""
         import os
         boundary = f"----pyvoog-{os.urandom(16).hex()}"
-        body_parts = []
-        for key, val in fields.items():
-            body_parts.append(
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
-                f"{val}\r\n"
-            )
-        body_parts.append(
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="{file_field}"; filename="{file_name}"\r\n'
-            f"Content-Type: {file_content_type}\r\n\r\n"
-        )
-        payload = b""
-        for part in body_parts:
-            payload += part.encode("utf-8")
-        payload += file_bytes
-        payload += f"\r\n--{boundary}--\r\n".encode("utf-8")
+        payload = self._build_multipart(boundary, fields, file_field, file_name, file_bytes, file_content_type)
 
         url = f"{self._config.base_url}{path}"
         self._log(f"POST {url} (multipart)")
@@ -319,6 +336,39 @@ class VoogAPI:
                 self._log(f"Network error ({exc.reason}), retrying in 2s…")
                 time.sleep(2)
                 return self._post_multipart(
+                    path, fields, file_field, file_name, file_bytes,
+                    file_content_type, _retry=_retry - 1,
+                )
+            raise APIError(f"Network error: {exc.reason}")
+
+    def _put_multipart(self, path, fields, file_field, file_name, file_bytes,
+                       file_content_type="application/octet-stream", _retry=1):
+        """Perform an authenticated multipart/form-data PUT (for binary asset updates)."""
+        import os
+        boundary = f"----pyvoog-{os.urandom(16).hex()}"
+        payload = self._build_multipart(boundary, fields, file_field, file_name, file_bytes, file_content_type)
+
+        url = f"{self._config.base_url}{path}"
+        self._log(f"PUT {url} (multipart)")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "X-API-Token": self._config.api_token,
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+            method="PUT",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            self._handle_http_error(exc, url)
+        except urllib.error.URLError as exc:
+            if _retry > 0:
+                self._log(f"Network error ({exc.reason}), retrying in 2s…")
+                time.sleep(2)
+                return self._put_multipart(
                     path, fields, file_field, file_name, file_bytes,
                     file_content_type, _retry=_retry - 1,
                 )

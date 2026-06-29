@@ -44,8 +44,10 @@ COMMANDS
           python pyvoog.py init --host mysite.voog.com --token abc123
           python pyvoog.py init ./my-site --host mysite.voog.com --token abc123
 
-  pull [--dry-run] [--reset]
-      Pull all layout, component .tpl files and design assets from the server.
+  pull [layouts|assets|FILE ...] [--dry-run] [--reset]
+      Pull layout, component .tpl files and design assets from the server.
+      With no target, pulls everything. Pass 'layouts' or 'assets' to limit
+      the scope, or one or more file paths to pull just those files.
       Server is always the source of truth; local files are overwritten.
       A git commit is made automatically after each successful pull.
       Only manifest-tracked files are staged in git — developer files are
@@ -53,6 +55,7 @@ COMMANDS
 
       Examples:
           python pyvoog.py pull
+          python pyvoog.py pull components/footer-popup.tpl
           python pyvoog.py pull --dry-run
           python pyvoog.py pull --reset
 
@@ -124,6 +127,10 @@ COMMANDS
       Example:
           python pyvoog.py new --list
 
+  experimental
+      Experimental features (environment diff and copy between local copies).
+      Run  pyvoog help experimental  for details.
+
   watch (not yet implemented)
       Watch local files for changes and push automatically.
 
@@ -165,19 +172,29 @@ Examples:
     python pyvoog.py init ./new-site --host mysite.voog.com --token abc123
 """,
     "pull": """\
-pyvoog pull [--dry-run] [--reset]
+pyvoog pull [layouts|assets|FILE ...] [--dry-run] [--reset]
 
-Pull all layouts, components, and design assets from the Voog server.
+Pull layouts, components, and design assets from the Voog server.
 Server content always overwrites local files.
 A git commit is made automatically after a successful pull.
 Only manifest-tracked files are staged in git.
 
+Targets (optional):
+    (none)    Pull everything (layouts, components, assets)
+    layouts   Pull only layouts and components
+    assets    Pull only design assets
+    FILE ...  Pull only the given file path(s), e.g. components/footer.tpl
+
 Arguments:
     --dry-run Show what would be written without writing anything
     --reset   Also remove local .tpl files not present on the server
+              (ignored when pulling specific files)
 
 Examples:
     python pyvoog.py pull
+    python pyvoog.py pull layouts
+    python pyvoog.py pull components/footer-popup.tpl
+    python pyvoog.py pull layouts/page.tpl stylesheets/main.css
     python pyvoog.py pull --dry-run
     python pyvoog.py pull --reset
 """,
@@ -231,6 +248,57 @@ List new files (no action):
 Type is inferred from the directory (layouts → page, components → component).
 Use --type to override for special layouts (blog, blog_article, etc.).
 """,
+    "experimental": """\
+pyvoog experimental — experimental features
+
+WARNING: These commands operate directly on local files.
+         env-copy overwrites files in the target directory without undo.
+         Always review the diff before confirming.
+
+Subcommands:
+
+  env-setup
+      Interactive wizard to configure the local directory path for each
+      environment section in .voog. Run once per machine to set up paths.
+
+      Example:
+          pyvoog experimental env-setup
+
+  env-diff SOURCE TARGET [--verbose]
+      Compare manifest-tracked files between two local environment directories.
+      Shows modified, only-in-source, only-in-target, and identical files.
+      Does not write anything.
+
+      Examples:
+          pyvoog experimental env-diff staging production
+          pyvoog experimental env-diff staging production --verbose
+
+  env-copy SOURCE TARGET [--dry-run]
+      Show differences then copy files from SOURCE to TARGET.
+      Asks how to proceed: copy all, abort, or select file by file.
+      In select mode, answer y/n per file and q to stop early.
+      Does NOT commit or push.
+
+      Examples:
+          pyvoog experimental env-copy staging production
+          pyvoog experimental env-copy staging production --dry-run
+
+Setup:
+    Run  pyvoog experimental env-setup  to configure the three env fields
+    in your .voog file. The env_peer_path is the only one that requires
+    a filesystem path — the current environment is always the directory
+    you run pyvoog from.
+
+    .voog example (after setup):
+
+        [mysite.voog.com]
+        host=mysite.voog.com
+        api_token=abc123
+        protocol=https
+        env_name=staging
+        env_peer_name=production
+        env_peer_path=C:\\path\\to\\production-site
+""",
 }
 
 
@@ -251,9 +319,22 @@ def cmd_pull(args, out, config, site_dir):
 
     api = VoogAPI(config, output=out)
 
-    subset = args.subset  # None, 'layouts', or 'assets'
+    # The positional accepts either a subset keyword ('layouts'/'assets')
+    # or one or more specific file paths.
+    targets = args.targets or []
+    subset = None
+    files = None
+    if len(targets) == 1 and targets[0] in ("layouts", "assets"):
+        subset = targets[0]
+    elif targets:
+        files = [t.replace("\\", "/") for t in targets]
+
     dry_run = args.dry_run
     reset = args.reset
+
+    if files and reset:
+        out.warn("--reset is ignored when pulling specific files.")
+        reset = False
 
     if dry_run:
         out.info("(dry-run mode — no files will be written)\n")
@@ -262,6 +343,7 @@ def cmd_pull(args, out, config, site_dir):
         api=api,
         site_dir=site_dir,
         subset=subset,
+        files=files,
         dry_run=dry_run,
         reset=reset,
         out=out,
@@ -438,6 +520,54 @@ def cmd_new(args, out, config, site_dir):
         return 0 if ok else 1
 
 
+def cmd_experimental(args, out, config, site_dir):
+    from pyvoog.config import find_voog_file, ConfigError as CE
+    from pyvoog.experimental_cmd import env_setup, env_diff, env_copy, resolve_env_dir
+
+    voog_file = find_voog_file(site_dir)
+
+    exp_cmd = getattr(args, "exp_command", None)
+
+    if exp_cmd == "env-setup":
+        return env_setup(site_dir, voog_file, config, out)
+
+    if exp_cmd in ("env-diff", "env-copy"):
+        try:
+            src_dir = resolve_env_dir(args.source, config, site_dir)
+            dst_dir = resolve_env_dir(args.target, config, site_dir)
+        except CE as exc:
+            out.error(str(exc))
+            return 1
+
+        if exp_cmd == "env-diff":
+            return env_diff(src_dir, dst_dir, args.source, args.target,
+                            out, verbose=args.verbose)
+
+        return env_copy(src_dir, dst_dir, args.source, args.target,
+                        args.dry_run, out)
+
+    # No subcommand — print mini-help
+    out.info("""\
+pyvoog experimental — experimental features (use with care)
+
+Subcommands:
+  env-setup
+      Configure environment names and peer path in .voog.
+
+  env-diff SOURCE TARGET [--verbose]
+      Show file differences between two local environments.
+
+  env-copy SOURCE TARGET [--dry-run]
+      Copy changed files from SOURCE to TARGET (asks for confirmation).
+
+Examples:
+  pyvoog experimental env-setup
+  pyvoog experimental env-diff staging production
+  pyvoog experimental env-copy staging production --dry-run
+""")
+    return 0
+
+
 def cmd_watch(args, out, config, site_dir):
     out.info("watch: not yet implemented.")
     return 1
@@ -479,7 +609,8 @@ def build_parser():
 
     # help
     p_help = sub.add_parser("help", help="Show help")
-    p_help.add_argument("topic", nargs="?", choices=list(COMMAND_HELP), metavar="command")
+    p_help.add_argument("topic", nargs="?", choices=list(COMMAND_HELP),
+                        metavar="command|experimental")
 
     # init
     p_init = sub.add_parser("init", help="Initialise a site directory")
@@ -494,9 +625,11 @@ def build_parser():
 
     # pull
     p_pull = sub.add_parser("pull", help="Pull files from the server")
-    p_pull.add_argument("subset", nargs="?", choices=["layouts", "assets"],
-                        default=None, metavar="[layouts|assets]",
-                        help="Pull only layouts or only assets (default: all)")
+    p_pull.add_argument("targets", nargs="*", default=[],
+                        metavar="[layouts|assets|FILE ...]",
+                        help="Pull only 'layouts', only 'assets', or specific "
+                             "file path(s) like components/footer.tpl "
+                             "(default: everything)")
     p_pull.add_argument("--dry-run", action="store_true",
                         help="Show what would be written without writing")
     p_pull.add_argument("--reset", action="store_true",
@@ -559,6 +692,38 @@ def build_parser():
 
     # watch (stub)
     sub.add_parser("watch", help="Watch for changes and push automatically (not yet implemented)")
+
+    # experimental
+    p_exp = sub.add_parser(
+        "experimental",
+        help="Experimental features — may overwrite files, use with care",
+    )
+    exp_sub = p_exp.add_subparsers(dest="exp_command", metavar="subcommand")
+
+    exp_sub.add_parser(
+        "env-setup",
+        help="Configure env_name, env_peer_name and env_peer_path in .voog",
+    )
+
+    p_env_diff = exp_sub.add_parser(
+        "env-diff",
+        help="Show file differences between two local environments",
+    )
+    p_env_diff.add_argument("source", metavar="SOURCE",
+                            help="Source environment name (matches env_name or env_peer_name in .voog)")
+    p_env_diff.add_argument("target", metavar="TARGET",
+                            help="Target environment name (matches env_name or env_peer_name in .voog)")
+
+    p_env_copy = exp_sub.add_parser(
+        "env-copy",
+        help="Copy changed files from one local environment to another (overwrites target)",
+    )
+    p_env_copy.add_argument("source", metavar="SOURCE",
+                            help="Source environment name (must match a section in .voog)")
+    p_env_copy.add_argument("target", metavar="TARGET",
+                            help="Target environment name (must match a section in .voog)")
+    p_env_copy.add_argument("--dry-run", action="store_true",
+                            help="Show what would be copied without writing anything")
 
     return parser
 
@@ -647,8 +812,9 @@ def main():
         "manifest": lambda: cmd_manifest(args, out, config, site_dir),
         "status":   lambda: cmd_status(args, out, config, site_dir),
         "push":     lambda: cmd_push(args, out, config, site_dir),
-        "new":      lambda: cmd_new(args, out, config, site_dir),
-        "watch":    lambda: cmd_watch(args, out, config, site_dir),
+        "new":          lambda: cmd_new(args, out, config, site_dir),
+        "watch":        lambda: cmd_watch(args, out, config, site_dir),
+        "experimental": lambda: cmd_experimental(args, out, config, site_dir),
     }
 
     handler = dispatch.get(args.command)

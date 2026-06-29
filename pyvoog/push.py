@@ -8,7 +8,7 @@ Conflict detection: server updated_at vs manifest updated_at — if the server
 Safety rules:
   - Only files present in manifest.json are eligible for push.
     Developer files in the same directories are silently ignored.
-  - Binary assets (images/fonts) cannot be updated via the API; skipped.
+  - Binary assets (images/fonts/SVGs) are pushed via multipart PUT.
   - Creating new remote files is not yet supported; files absent from the
     server get a clear error with a suggested remedy.
 """
@@ -252,10 +252,15 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
         server_ts   = server_info.get("updated_at", "")
         if not force and manifest_ts and server_ts and manifest_ts != server_ts:
             out and out.progress_done()
-            out and out.warn(
-                f"{rel_path}: CONFLICT — server was modified after last pull "
-                f"(pulled: {manifest_ts[:10]}, server now: {server_ts[:10]}). "
-                "Skipping. Run 'voog pull' to sync, or use --force to overwrite."
+            out and out.attention(
+                f"CONFLICT — {rel_path} was NOT pushed",
+                [
+                    "The server was modified after your last pull.",
+                    f"    pulled : {manifest_ts[:10]}",
+                    f"    server : {server_ts[:10]}",
+                    "Skipped to avoid overwriting server changes.",
+                    "-> Run 'voog pull' to sync, or 'voog push --force' to overwrite.",
+                ],
             )
             conflicts.append(rel_path)
             failed.append((rel_path, "conflict"))
@@ -266,10 +271,17 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
             continue
 
         # Read local content
-        abs_path = os.path.join(site_dir, rel_path)
+        abs_path   = os.path.join(site_dir, rel_path)
+        is_layout  = rel_path.startswith(("layouts/", "components/"))
+        asset_type = entry.get("asset_type", "")
+        is_binary  = not is_layout and asset_type not in TEXT_ASSET_TYPES
         try:
-            with open(abs_path, encoding="utf-8") as fh:
-                content = fh.read()
+            if is_binary:
+                with open(abs_path, "rb") as fh:
+                    content = fh.read()
+            else:
+                with open(abs_path, encoding="utf-8") as fh:
+                    content = fh.read()
         except OSError as exc:
             out and out.progress_done()
             out and out.warn(f"Could not read {rel_path}: {exc}")
@@ -277,22 +289,17 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
             continue
 
         # Upload
-        is_layout  = rel_path.startswith(("layouts/", "components/"))
-        asset_type = entry.get("asset_type", "")
         try:
             if is_layout:
                 resp = api.update_layout(server_info["id"], content)
-            elif asset_type in TEXT_ASSET_TYPES:
+            elif not is_binary:
                 resp = api.update_layout_asset(server_info["id"], content)
             else:
-                # Binary assets (image, font, svg…) cannot be updated in-place
-                out and out.progress_done()
-                out and out.warn(
-                    f"{rel_path}: binary assets cannot be pushed "
-                    "(images/fonts must be updated via the Voog editor)."
+                filename     = entry.get("filename", os.path.basename(rel_path))
+                content_type = entry.get("content_type", "application/octet-stream")
+                resp = api.update_layout_asset_binary(
+                    server_info["id"], filename, content, content_type
                 )
-                failed.append((rel_path, "binary asset"))
-                continue
 
             # Capture the new server timestamp so next push doesn't conflict
             new_ts = (resp or {}).get("updated_at", "")
