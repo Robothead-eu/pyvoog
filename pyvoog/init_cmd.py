@@ -36,6 +36,35 @@ __pycache__/
 Thumbs.db
 """
 
+# Appended to a .gitignore that already exists but doesn't exclude .voog.
+VOOG_IGNORE_RULE = """
+# pyvoog — API token, never commit this
+.voog
+"""
+
+
+def _ignores_voog(gitignore_text):
+    """
+    Return True if the .gitignore text already has a rule covering the .voog
+    *file*.
+
+    Only '.voog' and '/.voog' count. A trailing slash makes a pattern match
+    directories only — git does not ignore a regular file named .voog given
+    a '.voog/' rule — so those must not count, or the token silently stays
+    committable. A substring test would likewise be fooled by an unrelated
+    entry such as '.voog-cache/'.
+    """
+    for line in gitignore_text.splitlines():
+        rule = line.strip()
+        if not rule or rule.startswith("#") or rule.startswith("!"):
+            continue
+        if rule.endswith("/"):      # directory-only pattern, not our file
+            continue
+        if rule.lstrip("/") == ".voog":
+            return True
+    return False
+
+
 
 def init(target_dir, host, api_token, protocol="https", out=None):
     """
@@ -65,13 +94,51 @@ def init(target_dir, host, api_token, protocol="https", out=None):
         out and out.warn(f".voog already exists, not overwriting: {voog_path}")
     else:
         write_voog_file(voog_path, host, api_token, protocol=protocol)
+        # Owner-only: the file holds a live API token. No-op on Windows.
+        try:
+            os.chmod(voog_path, 0o600)
+        except OSError:
+            pass
         out and out.info(f"Created .voog (keep this file private — it contains your API token)")
 
     # -- Write .gitignore ----------------------------------------------
+    #
+    # An existing .gitignore is never overwritten, but the .voog rule must
+    # still be added — otherwise the API token sits in a committable file
+    # and the very next `git add -A` puts it in history. Adding pyvoog to an
+    # existing site directory is a documented workflow, and such directories
+    # almost always already have a .gitignore.
 
     gitignore_path = os.path.join(abs_dir, ".gitignore")
     if os.path.isfile(gitignore_path):
-        out and out.log(".gitignore already exists, not overwriting.")
+        try:
+            # errors="replace": a latin-1 .gitignore (common in older
+            # European repos) must not abort init and leave the freshly
+            # written token un-ignored. We only ever append, so a lossy
+            # read cannot corrupt the file.
+            with open(gitignore_path, encoding="utf-8", errors="replace") as f:
+                existing = f.read()
+        except OSError as exc:
+            existing = ""
+            out and out.warn(f"Could not read .gitignore: {exc}")
+
+        if _ignores_voog(existing):
+            out and out.log(".gitignore already excludes .voog.")
+        else:
+            try:
+                with open(gitignore_path, "a", encoding="utf-8") as f:
+                    if existing and not existing.endswith("\n"):
+                        f.write("\n")
+                    f.write(VOOG_IGNORE_RULE)
+                out and out.info(
+                    "Added .voog to the existing .gitignore "
+                    "(it holds your API token)."
+                )
+            except OSError as exc:
+                out and out.warn(
+                    f"Could not update .gitignore: {exc}. "
+                    "Add a '.voog' line yourself — it contains your API token."
+                )
     else:
         with open(gitignore_path, "w", encoding="utf-8") as f:
             f.write(SITE_GITIGNORE)

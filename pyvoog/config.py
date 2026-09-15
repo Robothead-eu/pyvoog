@@ -74,8 +74,17 @@ def load_config(site_dir=None, site_name=None):
             "Run  pyvoog init --host <host> --token <token>  to set up a site here."
         )
 
-    cp = configparser.ConfigParser()
-    cp.read(voog_file, encoding="utf-8")
+    # interpolation=None: a '%' in an API token is a literal, not the start
+    # of a %(name)s reference. With the default BasicInterpolation the read
+    # below still succeeds — values are stored raw — but the later
+    # cfg.get("api_token") raises InterpolationSyntaxError, which is not a
+    # ConfigError and so escaped the caller's handler as a raw traceback.
+    cp = configparser.ConfigParser(interpolation=None)
+    try:
+        cp.read(voog_file, encoding="utf-8")
+    except configparser.Error as exc:
+        # Malformed .voog (no section header, duplicate keys, ...).
+        raise ConfigError(f"Could not parse {voog_file}:\n  {exc}") from exc
 
     sections = cp.sections()
     if not sections:
@@ -143,8 +152,11 @@ def update_env_config(voog_file, section, env_name, env_peer_name, env_peer_path
     Write env_name, env_peer_name, env_peer_path into a .voog section.
     Preserves all other fields.
     """
-    cp = configparser.ConfigParser()
-    cp.read(voog_file, encoding="utf-8")
+    cp = configparser.ConfigParser(interpolation=None)
+    try:
+        cp.read(voog_file, encoding="utf-8")
+    except configparser.Error as exc:
+        raise ConfigError(f"Could not parse {voog_file}:\n  {exc}") from exc
 
     if section not in cp:
         raise ConfigError(f"Section [{section}] not found in {voog_file}")

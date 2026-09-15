@@ -127,6 +127,15 @@ COMMANDS
       Example:
           python pyvoog.py new --list
 
+  remove FILE [FILE ...] [--local-only|--remote-only] [--dry-run] [--yes]
+      Delete layouts/components/assets locally AND on the server, and
+      drop them from manifest.json. Always confirms first.
+
+      Examples:
+          python pyvoog.py remove layouts/old_page.tpl
+          python pyvoog.py remove components/unused.tpl --dry-run
+          python pyvoog.py remove images/logo.png --remote-only
+
   experimental
       Experimental features (environment diff and copy between local copies).
       Run  pyvoog help experimental  for details.
@@ -247,6 +256,33 @@ List new files (no action):
 
 Type is inferred from the directory (layouts → page, components → component).
 Use --type to override for special layouts (blog, blog_article, etc.).
+""",
+    "remove": """\
+pyvoog remove FILE [FILE ...] [options]
+
+Delete layouts, components and assets locally AND on the Voog server,
+and drop them from manifest.json.
+
+OPTIONS
+    --local-only    Delete the local file only; leave the server untouched
+    --remote-only   Delete on the server only; keep the local file
+    --dry-run       Show what would be deleted, delete nothing
+    --yes, -y       Skip the confirmation prompt
+
+EXAMPLES
+    pyvoog remove layouts/old_page.tpl
+    pyvoog remove components/unused.tpl stylesheets/legacy.css
+    pyvoog remove images/logo.png --remote-only
+    pyvoog remove layouts/old_page.tpl --dry-run
+
+NOTES
+  - A server delete cannot be undone. git only ever held the local copy,
+    so the command always confirms first unless you pass --yes.
+  - Server IDs are read from a fresh listing, not from manifest.json, so a
+    stale manifest cannot point the delete at the wrong resource.
+  - Voog refuses to delete a layout that is still assigned to a page, or on
+    a site that is not using a custom design. That is reported per file.
+  - The removal is committed to git afterwards.
 """,
     "experimental": """\
 pyvoog experimental — experimental features
@@ -520,6 +556,31 @@ def cmd_new(args, out, config, site_dir):
         return 0 if ok else 1
 
 
+def cmd_remove(args, out, config, site_dir):
+    from pyvoog.remove_cmd import remove
+
+    api = VoogAPI(config, output=out)
+
+    if args.local_only and args.remote_only:
+        out.error("--local-only and --remote-only are mutually exclusive.")
+        return 1
+
+    if args.dry_run:
+        out.info("(dry-run mode — nothing will be deleted)\n")
+
+    succeeded, failed = remove(
+        api=api,
+        site_dir=site_dir,
+        files=args.files,
+        local_only=args.local_only,
+        remote_only=args.remote_only,
+        dry_run=args.dry_run,
+        assume_yes=args.yes,
+        out=out,
+    )
+    return 1 if failed else 0
+
+
 def cmd_experimental(args, out, config, site_dir):
     from pyvoog.config import find_voog_file, ConfigError as CE
     from pyvoog.experimental_cmd import env_setup, env_diff, env_copy, resolve_env_dir
@@ -690,6 +751,21 @@ def build_parser():
         help="Show what would be created without creating",
     )
 
+    # remove
+    p_remove = sub.add_parser(
+        "remove", help="Delete layouts/assets locally and on the server"
+    )
+    p_remove.add_argument("files", nargs="+", metavar="FILE",
+                          help="File(s) to remove, e.g. layouts/old.tpl")
+    p_remove.add_argument("--local-only", action="store_true",
+                          help="Delete the local file only; leave the server untouched")
+    p_remove.add_argument("--remote-only", action="store_true",
+                          help="Delete on the server only; keep the local file")
+    p_remove.add_argument("--dry-run", action="store_true",
+                          help="Show what would be deleted without deleting")
+    p_remove.add_argument("--yes", "-y", action="store_true",
+                          help="Skip the confirmation prompt")
+
     # watch (stub)
     sub.add_parser("watch", help="Watch for changes and push automatically (not yet implemented)")
 
@@ -813,6 +889,7 @@ def main():
         "status":   lambda: cmd_status(args, out, config, site_dir),
         "push":     lambda: cmd_push(args, out, config, site_dir),
         "new":          lambda: cmd_new(args, out, config, site_dir),
+        "remove":       lambda: cmd_remove(args, out, config, site_dir),
         "watch":        lambda: cmd_watch(args, out, config, site_dir),
         "experimental": lambda: cmd_experimental(args, out, config, site_dir),
     }

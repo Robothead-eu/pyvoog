@@ -109,7 +109,9 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
 
     # -- Determine candidates -----------------------------------------
 
-    to_create = []  # files not in manifest that will be created (--create)
+    to_create = []       # files not in manifest that will be created (--create)
+    swept_creates = []   # subset of to_create found by scanning, not named
+    skipped_creates = [] # local-only files --create refused to publish
 
     if files:
         # Explicit file list from the command line
@@ -138,10 +140,34 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
         changed = git.changed_files(site_dir)
         candidates = [f for f in changed if f in by_file]
 
+        if create:
+            # Brand-new files are untracked, and `git diff HEAD` never lists
+            # untracked files — so without this, `push --create` with no file
+            # arguments could never create anything, which is its whole point.
+            #
+            # Only untracked files count as new. `changed` also lists files
+            # that were *deleted*, and offering to "create" a file that is no
+            # longer on disk just produces a guaranteed failure.
+            from .new_cmd import _classify_file, is_publishable
+
+            for f in git.untracked_files(site_dir):
+                if f in by_file or f == "manifest.json":
+                    continue
+                if not _classify_file(f):
+                    continue           # not in a site directory at all
+                if not os.path.isfile(os.path.join(site_dir, f)):
+                    continue
+                if is_publishable(f):
+                    swept_creates.append(f)
+                else:
+                    skipped_creates.append(f)
+
+            to_create.extend(swept_creates)
+
         # Log skipped developer files (verbose only)
         skipped_dev = [
             f for f in changed
-            if f not in by_file and f != "manifest.json"
+            if f not in by_file and f != "manifest.json" and f not in to_create
         ]
         if skipped_dev:
             out and out.log(
@@ -149,6 +175,17 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
                 + ", ".join(skipped_dev[:3])
                 + ("…" if len(skipped_dev) > 3 else "") + ")"
             )
+
+    if skipped_creates:
+        out and out.info(
+            f"{len(skipped_creates)} local-only file(s) not publishable to Voog:"
+        )
+        for f in skipped_creates:
+            out and out.info(f"  - {f}")
+        out and out.info(
+            "  Voog takes only .tpl layouts, .css, .js, images and assets/ "
+            "files, each with a flat filename.\n"
+        )
 
     if not candidates and not to_create:
         out and out.info(
@@ -167,6 +204,31 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
             out and out.info(f"  + {f}")
     out and out.info("")
 
+    # Files the user named are taken as intended. Files we found by scanning
+    # the working tree are not: creating them publishes new pages to a live
+    # site, so confirm first, the same way `pyvoog new --all` does.
+    if swept_creates and not dry_run:
+        try:
+            answer = input(
+                f"Create {len(swept_creates)} new file(s) on the server? [y/N] "
+            ).strip().lower()
+        except EOFError:
+            # No TTY (a script or CI run). Decline the creates, but still do
+            # the ordinary push — aborting everything would mean a scripted
+            # `push --create` silently uploads nothing at all.
+            answer = "n"
+            out and out.info("")
+        except KeyboardInterrupt:
+            out and out.info("\nAborted.")
+            return succeeded, failed
+
+        if answer not in ("y", "yes"):
+            out and out.info(
+                "Not creating new files; pushing changes to existing files only.\n"
+            )
+            to_create = [f for f in to_create if f not in swept_creates]
+            swept_creates = []
+
     # -- Fetch server state for conflict detection --------------------
     #
     # We fetch the full layout/asset lists (lightweight — no bodies).
@@ -176,8 +238,9 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
 
     out and out.info("Checking server state…")
 
-    has_layouts = any(f.startswith(("layouts/", "components/")) for f in candidates)
-    has_assets  = any(not f.startswith(("layouts/", "components/")) for f in candidates)
+    checked = candidates + to_create
+    has_layouts = any(f.startswith(("layouts/", "components/")) for f in checked)
+    has_assets  = any(not f.startswith(("layouts/", "components/")) for f in checked)
 
     server_by_file = {}  # {rel_path: {"id": int, "updated_at": str}}
 
@@ -311,8 +374,22 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
 
         except APIError as exc:
             out and out.progress_done()
-            out and out.warn(f"Failed to push {rel_path}: {exc}")
-            failed.append((rel_path, str(exc)))
+            if is_binary:
+                # Verified against a live site: PUT /admin/api/layout_assets/:id
+                # returns 500 for a multipart body regardless of the field name,
+                # and for a freshly created asset too, while multipart POST
+                # (create) succeeds. Voog simply cannot replace binary asset
+                # content over the API, so a bare "HTTP 500" is misleading.
+                out and out.warn(
+                    f"Cannot replace {rel_path} — Voog's API does not support "
+                    f"updating binary assets ({exc}). Re-upload it in the Voog "
+                    "editor, or give the new file a different name and run "
+                    f"'voog new {rel_path}'."
+                )
+                failed.append((rel_path, "binary update unsupported by Voog"))
+            else:
+                out and out.warn(f"Failed to push {rel_path}: {exc}")
+                failed.append((rel_path, str(exc)))
 
     out and out.progress_done()
 
@@ -338,6 +415,18 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
                     "Expected: layouts/, components/, stylesheets/, javascripts/, images/, assets/"
                 )
                 failed.append((rel_path, "unknown type"))
+                continue
+
+            # Already on the server? Creating it again would make a duplicate
+            # layout, or fail on the asset filename uniqueness rule. This
+            # happens whenever manifest.json is stale — someone added the file
+            # in the Voog editor, or the manifest was never pulled.
+            if rel_path in server_by_file:
+                out and out.warn(
+                    f"{rel_path}: already exists on the server — not creating a "
+                    "duplicate. Run 'voog pull' to pick it up, then push normally."
+                )
+                failed.append((rel_path, "already on server"))
                 continue
 
             kind = info["kind"]

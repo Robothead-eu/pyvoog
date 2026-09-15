@@ -205,6 +205,12 @@ class VoogAPI:
         """
         Push new binary content to a layout asset (image/font/SVG) via multipart PUT.
         Returns the updated asset dict from the server.
+
+        NB: Voog currently rejects this — a live site returns HTTP 500 for a
+        multipart PUT under any field name, including on an asset created
+        moments earlier, while multipart POST (create) works fine. Kept so the
+        call starts working if Voog adds support; push turns the failure into
+        an actionable message rather than a bare 500.
         """
         return self._put_multipart(
             f"/admin/api/layout_assets/{asset_id}",
@@ -218,6 +224,62 @@ class VoogAPI:
     def download_url(self, url):
         """Download binary content from a public URL (no auth needed)."""
         return self._download(url)
+
+    # ------------------------------------------------------------------
+    # Delete
+    # ------------------------------------------------------------------
+
+    def delete_layout(self, layout_id):
+        """
+        Delete a layout/component on the server.
+
+        Voog refuses this when the layout is still assigned to a page, or when
+        the site is not on a custom design — both surface as an APIError.
+        """
+        return self._delete(f"/admin/api/layouts/{layout_id}")
+
+    def delete_layout_asset(self, asset_id):
+        """Delete a layout asset (CSS, JS, image, font) on the server."""
+        return self._delete(f"/admin/api/layout_assets/{asset_id}")
+
+    def _delete(self, path, _retry=1, _retried=False):
+        """
+        Perform an authenticated DELETE.
+
+        A successful delete answers 204 No Content, so there is no body to
+        parse — returning True keeps callers from having to care.
+
+        _retried marks a re-sent request. If the first DELETE reached the
+        server and only its response was lost, the retry sees 404; treating
+        that as a failure would report a resource as still present when it is
+        already gone. DELETE is idempotent, so 404-after-retry is success.
+        """
+        url = f"{self._config.base_url}{path}"
+        self._log(f"DELETE {url}")
+        req = urllib.request.Request(
+            url,
+            headers={"X-API-Token": self._config.api_token},
+            method="DELETE",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                resp.read()
+                return True
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404 and _retried:
+                self._log("404 on retry \u2014 already deleted, treating as success.")
+                return True
+            self._handle_http_error(exc, url)
+        except urllib.error.URLError as exc:
+            if _retry > 0:
+                self._log(f"Network error ({exc.reason}), retrying in 2s\u2026")
+                time.sleep(2)
+                return self._delete(path, _retry=_retry - 1, _retried=True)
+            raise APIError(f"Network error: {exc.reason}")
+        except OSError as exc:
+            # A socket read timeout is an OSError but not a URLError, so it
+            # would otherwise escape uncaught and abort the caller's whole run.
+            raise APIError(f"Network error: {exc}")
 
     # ------------------------------------------------------------------
     # Create (POST)

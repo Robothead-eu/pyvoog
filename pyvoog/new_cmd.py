@@ -13,6 +13,7 @@ Override with --type for special layouts (blog, blog_article, etc.).
 """
 
 import os
+import re
 import sys
 
 from .api import APIError
@@ -76,6 +77,63 @@ def _classify_file(rel_path):
     elif directory in DIR_TO_ASSET_TYPE:
         return {"kind": "asset", "rel_path": rel_path, "filename": filename, "dir": directory}
     return None
+
+
+# Editor/tool leftovers that must never be created on a live site.
+_JUNK_SUFFIXES = (".bak", ".orig", ".rej", ".swp", ".swo", ".tmp")
+
+# Ruby kit: SVG counts as an asset, not an image.
+_IMAGE_EXTENSIONS = frozenset(
+    (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".avif",
+     ".tif", ".tiff", ".heic", ".heif")
+)
+
+
+def is_publishable(rel_path):
+    """
+    Return True if rel_path is a file worth offering to create on the server.
+
+    Bulk operations (new --all, push --create) scan whole directories, so
+    without this they offer .DS_Store, vim swap files and editor backups as
+    real layouts. The per-folder extension rules mirror the Ruby kit's
+    valid_for_folder? — the server only accepts pure .tpl/.css/.js anyway.
+
+    Explicitly named files (pyvoog new <file>) deliberately bypass this: if
+    the user names a file, trust them.
+    """
+    info = _classify_file(rel_path)
+    if not info:
+        return False
+
+    # Voog's namespace is flat — an asset is served from /stylesheets/<name>
+    # and a layout is addressed by a bare layout_name — so a nested path has
+    # no representation on the server. Creating one yields a layout literally
+    # named "partials/nested".
+    if "/" in info["filename"]:
+        return False
+
+    basename = os.path.basename(info["filename"])
+    if basename.startswith("."):          # .DS_Store, .page.tpl.swp
+        return False
+    if basename.endswith("~"):            # editor backups
+        return False
+
+    lower = basename.lower()
+    if lower.endswith(_JUNK_SUFFIXES):
+        return False
+
+    directory = info["dir"]
+    if directory in ("layouts", "components"):
+        # Ruby: /\A[^\.]+\.tpl\z/ — exactly one dot, and it is .tpl
+        return re.fullmatch(r"[^.]+\.tpl", basename) is not None
+    if directory == "stylesheets":
+        return lower.endswith(".css")
+    if directory == "javascripts":
+        return lower.endswith(".js")
+    if directory == "images":
+        return os.path.splitext(lower)[1] in _IMAGE_EXTENSIONS
+    # assets/: fonts, SVG, anything else the site needs
+    return True
 
 
 def _guess_content_type(filename):
@@ -175,12 +233,34 @@ def _create_asset(api, site_dir, info, dry_run=False, out=None):
 # Find local files not on the server
 # ------------------------------------------------------------------
 
+def _report_skipped(skipped, out):
+    """Tell the user which local-only files were not offered, and why."""
+    if not skipped or not out:
+        return
+    out.info(f"\n{len(skipped)} local file(s) skipped (not publishable to Voog):")
+    for rel in skipped:
+        out.info(f"  - {rel}")
+    out.info(
+        "  Voog takes only .tpl layouts, .css, .js, images and assets/ files, "
+        "each with a flat filename."
+    )
+    if any(f.startswith("images/") and f.lower().endswith(".svg") for f in skipped):
+        out.info("  An SVG belongs in assets/, not images/ — move it there.")
+    out.info("  Name a file explicitly to override:  pyvoog new <file>")
+
+
 def _find_new_files(site_dir, server_layout_paths, server_asset_paths):
     """
     Scan local directories for files that exist locally but not on the server.
-    Returns a list of classified file info dicts.
+
+    Returns (new_files, skipped) where new_files is a list of classified file
+    info dicts and skipped is a list of relative paths that look local-only
+    but are not publishable (editor leftovers, .scss, an SVG under images/).
+    Skipped paths are reported rather than dropped silently — a file that
+    quietly never reaches the server is worse than one that is refused.
     """
     new_files = []
+    skipped = []
 
     dirs_to_scan = ["layouts", "components", "stylesheets", "javascripts", "images", "assets"]
     for d in dirs_to_scan:
@@ -196,15 +276,19 @@ def _find_new_files(site_dir, server_layout_paths, server_asset_paths):
             if not info:
                 continue
 
-            # Check if already on server
+            # Already on the server? Then it is neither new nor skipped.
             if info["kind"] in ("layout", "component"):
-                if rel_path not in server_layout_paths:
-                    new_files.append(info)
-            else:
-                if rel_path not in server_asset_paths:
-                    new_files.append(info)
+                if rel_path in server_layout_paths:
+                    continue
+            elif rel_path in server_asset_paths:
+                continue
 
-    return new_files
+            if is_publishable(rel_path):
+                new_files.append(info)
+            else:
+                skipped.append(rel_path)
+
+    return new_files, skipped
 
 
 # ------------------------------------------------------------------
@@ -280,7 +364,9 @@ def list_new(api, site_dir, out=None):
             asset_file_path(asset.get("filename", ""), asset.get("asset_type", ""))
         )
 
-    new_files = _find_new_files(site_dir, server_layout_paths, server_asset_paths)
+    new_files, skipped = _find_new_files(
+        site_dir, server_layout_paths, server_asset_paths
+    )
 
     if not new_files:
         out and out.info("\nNo new local files. Everything is on the server.")
@@ -290,6 +376,7 @@ def list_new(api, site_dir, out=None):
             out and out.info(f"  + {info['rel_path']}  ({info['kind']})")
         out and out.info(f"\nUse  pyvoog new <file>  or  pyvoog new --all  to create them.")
 
+    _report_skipped(skipped, out)
     return new_files
 
 
@@ -331,7 +418,10 @@ def new_all(api, site_dir, dry_run=False, out=None):
         )
 
     # Find new local files
-    new_files = _find_new_files(site_dir, server_layout_paths, server_asset_paths)
+    new_files, skipped = _find_new_files(
+        site_dir, server_layout_paths, server_asset_paths
+    )
+    _report_skipped(skipped, out)
 
     if not new_files:
         out and out.info("No new local files to create on the server.")
