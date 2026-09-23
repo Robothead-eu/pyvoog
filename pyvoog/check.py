@@ -1,17 +1,4 @@
-"""
-check.py — Compare local files against the remote Voog site.
-
-Reports:
-  Layouts:
-    missing   — files on server that don't exist locally
-    modified  — files that exist locally but differ from the server
-    in_sync   — files that match the server exactly
-    extra     — local .tpl files with no corresponding remote layout
-  Assets:
-    missing   — design assets on server not present locally
-    present   — assets that exist locally
-    extra     — local asset files with no corresponding remote asset
-"""
+"""Compare local layouts and assets with the remote site (read-only)."""
 
 import os
 
@@ -23,13 +10,11 @@ ASSET_DIRS = ("stylesheets", "javascripts", "images", "assets")
 
 
 def check(api, site_dir, out=None):
-    """
-    Fetch remote layouts + assets and compare with local files.
+    """Compare remote layouts and assets with local files.
 
-    Returns a dict:
-        layouts  — {missing, modified, in_sync, extra}
-        assets   — {missing, present, extra}
-        error    — error string if API call failed, else None
+    Returns {"layouts": {missing, modified, in_sync, extra},
+             "assets": {missing, present, extra}, "error": str or None},
+    each category a list of relative paths.
     """
     result = {
         "layouts": {"missing": [], "modified": [], "in_sync": [], "extra": []},
@@ -76,7 +61,6 @@ def check(api, site_dir, out=None):
 
     out and out.progress_done()
 
-    # Check for extra local .tpl files
     for d in ("layouts", "components"):
         abs_dir = os.path.join(site_dir, d)
         if not os.path.isdir(abs_dir):
@@ -114,7 +98,6 @@ def check(api, site_dir, out=None):
 
     out and out.progress_done()
 
-    # Check for extra local asset files
     for d in ASSET_DIRS:
         abs_dir = os.path.join(site_dir, d)
         if not os.path.isdir(abs_dir):
@@ -136,7 +119,6 @@ def display_check_result(result, out):
         out.error(result["error"])
         return
 
-    # Layouts summary
     total_layouts = (
         len(layouts["missing"])
         + len(layouts["modified"])
@@ -158,7 +140,6 @@ def display_check_result(result, out):
     in_sync_count = len(layouts["in_sync"])
     out.info(f"  In sync: {in_sync_count}")
 
-    # Assets summary
     total_assets = len(assets["missing"]) + len(assets["present"])
     if total_assets or assets["extra"]:
         out.info(f"\nAssets ({total_assets} on server):")
@@ -172,7 +153,6 @@ def display_check_result(result, out):
                 out.info(f"    + {f}")
         out.info(f"  Present: {len(assets['present'])}")
 
-    # Overall verdict
     total_issues = (
         len(layouts["missing"])
         + len(layouts["modified"])

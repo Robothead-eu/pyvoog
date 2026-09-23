@@ -1,10 +1,9 @@
-"""
-status.py — Show site info, git state, and file counts.
-"""
+"""Show site info, manifest and content counts, and git state."""
 
 import os
 
 from . import git
+from .content import read_manifest as load_content_manifest
 from .manifest import load as load_manifest
 
 
@@ -28,6 +27,20 @@ def status(site_dir, config, out):
         out.info(f"  Assets:     {len(assets)}")
     else:
         out.info("\nManifest: not found (run  voog pull  to create it)")
+
+    # -- Content copy (pull content) ------------------------------------
+
+    content = load_content_manifest(site_dir)
+    if isinstance(content, dict):
+        counts = ", ".join(f"{n} {k}" for k, n in content.get("counts", {}).items())
+        scope = " (published only)" if content.get("options", {}).get("published_only") else ""
+        out.info(f"\nContent (.voog-content/): pulled {content.get('pulled_at', '?')}{scope}")
+        if counts:
+            out.info(f"  {counts}")
+    elif config.content_pull is not True:
+        out.info("\nContent: disabled (set  content_pull=true  in .voog to enable  pull content)")
+    else:
+        out.info("\nContent: not pulled (run  pyvoog pull content  for voog-server)")
 
     # -- Git info ------------------------------------------------------
 

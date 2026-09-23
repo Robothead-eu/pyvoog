@@ -1,13 +1,7 @@
-"""
-remove_cmd.py — Delete layouts and assets locally and on the Voog server.
+"""Delete layouts and assets locally and on the Voog server (`kit remove`).
 
-Equivalent of the Ruby kit's `kit remove`, which deletes the local file, the
-manifest entry and the remote resource in one go. Unlike the Ruby kit this
-asks before touching the server: a delete cannot be undone from here, and the
-git history only covers the local copy.
-
-Server IDs come from a fresh listing rather than from manifest.json, because
-a stale manifest would otherwise point a delete at the wrong resource.
+Server ids come from a live listing, not manifest.json, so a stale manifest
+can't point a delete at the wrong resource.
 """
 
 import os
@@ -19,24 +13,14 @@ from .manifest import (
 )
 
 
-# The only directories a Voog site owns. Confining removes to these keeps
-# `pyvoog remove` from touching .voog (which holds the API token),
-# manifest.json, or any developer file that happens to share the directory.
+# Removes are confined to these so .voog (API token) and manifest.json can't be hit.
 SITE_DIRS = frozenset(
     ("layouts", "components", "stylesheets", "javascripts", "images", "assets")
 )
 
 
 def _resolve_target(site_dir, raw_path):
-    """
-    Turn a user-supplied path into a safe (rel_path, abs_path) pair.
-
-    Returns (rel_path, abs_path, None) when the path is acceptable, or
-    (rel_path, None, reason) when it must be refused. This command deletes
-    files, so the path is checked rather than trusted: a stray `../` from a
-    shell completion would otherwise remove something outside the site
-    entirely.
-    """
+    """Validate a user path. Returns (rel, abs, None) or (rel, None, reason)."""
     rel = raw_path.replace("\\", "/").strip().strip("/")
     if not rel:
         return raw_path, None, "empty path"
@@ -58,8 +42,7 @@ def _resolve_target(site_dir, raw_path):
         )
 
     abs_path = os.path.abspath(os.path.join(site_dir, rel))
-    # Belt and braces: a symlinked site directory, or a drive-absolute path on
-    # Windows, could still land outside despite the checks above.
+    # Symlinks or Windows drive-absolute paths can still escape the checks above.
     root = os.path.realpath(site_dir)
     if os.path.commonpath([os.path.realpath(os.path.dirname(abs_path)), root]) != root:
         return rel, None, "path resolves outside the site directory"
@@ -68,13 +51,9 @@ def _resolve_target(site_dir, raw_path):
 
 
 def _server_maps(api, want_layouts, want_assets):
-    """
-    Return ({rel_path: (kind, id)}, {rel_path: [ids]}) for the live server.
+    """Return ({rel_path: (kind, id)}, {rel_path: [ids]}) for the live server.
 
-    The second dict holds paths that more than one server resource maps to —
-    two assets whose differing asset_type still folds into assets/, say. The
-    whole point of resolving ids from a live listing is to delete the right
-    thing, so an ambiguous path is refused rather than resolved arbitrarily.
+    The second dict lists paths several server resources map to; callers refuse them.
     """
     found = {}
     collisions = {}
@@ -95,7 +74,7 @@ def _server_maps(api, want_layouts, want_assets):
 
 
 def _drop_from_manifest(manifest, rel_path):
-    """Remove the entry for rel_path from the manifest. Returns True if found."""
+    """Drop rel_path from the manifest. Returns True if an entry was removed."""
     changed = False
     for key in ("layouts", "assets"):
         entries = manifest.get(key, [])
@@ -108,17 +87,7 @@ def _drop_from_manifest(manifest, rel_path):
 
 def remove(api, site_dir, files, local_only=False, remote_only=False,
            dry_run=False, assume_yes=False, out=None):
-    """
-    Remove files locally and/or on the server, and drop them from the manifest.
-
-    files       — list of relative paths
-    local_only  — delete the local file only, leave the server alone
-    remote_only — delete on the server only, keep the local file
-    dry_run     — print the plan, change nothing
-    assume_yes  — skip the confirmation prompt
-
-    Returns (succeeded, failed).
-    """
+    """Remove files locally and/or on the server. Returns (succeeded, failed)."""
     succeeded = []
     failed = []
 
@@ -208,14 +177,9 @@ def remove(api, site_dir, files, local_only=False, remote_only=False,
 
     if dry_run:
         out and out.info("\n[dry-run] Nothing was removed.")
-        # The plan is what was asked for; refusals above are already in
-        # `failed` and still set a non-zero exit.
         return [p[0] for p in plan], failed
 
     # -- Confirm -------------------------------------------------------
-    #
-    # Deleting on the server is irreversible and git only ever held the local
-    # copy, so this always asks unless the caller passed --yes.
 
     if not assume_yes:
         scopes = []
@@ -241,13 +205,10 @@ def remove(api, site_dir, files, local_only=False, remote_only=False,
     manifest_dirty = False
 
     for rel_path, abs_path, has_local, kind_id in plan:
-        # Anything unexpected is contained to this one file: aborting the loop
-        # would skip the manifest save and the git commit below, leaving the
-        # manifest disagreeing with both disk and server for files already
-        # deleted. A read timeout raises TimeoutError, not APIError, so this
-        # catches Exception rather than just APIError.
+        # Contain any error to this file so the manifest save below still runs.
+        # Read timeouts raise TimeoutError, not APIError.
         try:
-            # Server first: if it fails, the local copy is still there to retry.
+            # Server first, so a failure leaves the local copy for a retry.
             if kind_id and not local_only:
                 kind, res_id = kind_id
                 try:
@@ -270,9 +231,7 @@ def remove(api, site_dir, files, local_only=False, remote_only=False,
                     failed.append((rel_path, str(exc)))
                     continue
 
-                # The server copy is gone, so the manifest entry is wrong as of
-                # now. Drop it before attempting the local delete, which may
-                # fail on its own.
+                # Server copy is gone: drop the entry before the local delete can fail.
                 if _drop_from_manifest(manifest, rel_path):
                     manifest_dirty = True
 
@@ -297,9 +256,7 @@ def remove(api, site_dir, files, local_only=False, remote_only=False,
 
     # -- Save manifest + commit ---------------------------------------
 
-    # Save whenever the manifest changed, not only on success: a server delete
-    # can succeed and the local delete still fail, and the manifest must not go
-    # on claiming a resource that is already gone.
+    # Save even on partial failure: a server delete may succeed while the local one fails.
     if manifest_dirty:
         try:
             save_manifest(manifest, site_dir)
@@ -312,8 +269,7 @@ def remove(api, site_dir, files, local_only=False, remote_only=False,
         if git.git_available():
             try:
                 git.ensure_repo(site_dir)
-                # --remote-only keeps the local files, so staging them would
-                # make a commit named "remove" that adds a file.
+                # --remote-only keeps local files; staging them would add, not remove.
                 paths = [] if remote_only else list(succeeded)
                 if manifest_dirty:
                     paths.append("manifest.json")
@@ -326,7 +282,6 @@ def remove(api, site_dir, files, local_only=False, remote_only=False,
             except RuntimeError as exc:
                 out and out.warn(f"Git commit after remove failed: {exc}")
 
-    # Not out.summary() — that reports "N written", which reads wrong here.
     parts = [f"{len(succeeded)} removed"]
     if failed:
         parts.append(f"{len(failed)} failed")

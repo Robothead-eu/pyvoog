@@ -1,31 +1,4 @@
-"""
-manifest.py — Manifest loading, saving, building and diffing.
-
-The manifest.json format matches the Ruby voog-kit so existing manifests
-are compatible. Structure:
-
-    {
-      "layouts": [
-        {
-          "title": "Common page",
-          "layout_name": "common_page",
-          "content_type": "page",
-          "component": false,
-          "file": "layouts/common_page.tpl"
-        },
-        ...
-      ],
-      "assets": [
-        {
-          "kind": "stylesheet",
-          "filename": "main.css",
-          "file": "stylesheets/main.css",
-          "content_type": "text/css"
-        },
-        ...
-      ]
-    }
-"""
+"""Build, load, save and display manifest.json (voog-kit compatible format)."""
 
 import json
 import os
@@ -42,7 +15,7 @@ def layout_file_path(layout_name, component):
     return f"layouts/{layout_name}.tpl"
 
 
-# Maps asset_type from the Voog API to local directory names.
+# Voog asset_type -> local directory; other types go to assets/.
 ASSET_DIR_MAP = {
     "stylesheet": "stylesheets",
     "javascript": "javascripts",
@@ -61,15 +34,9 @@ def asset_file_path(filename, asset_type):
 # ------------------------------------------------------------------
 
 def build_from_api(layouts, assets):
-    """
-    Build a manifest dict from API responses.
+    """Build a manifest from API layout and layout_asset lists.
 
-    layouts — list of layout dicts from GET /admin/api/layouts
-    assets  — list of asset dicts from GET /admin/api/layout_assets
-
-    Each entry includes 'id' and 'updated_at' (when present) so push can:
-      - detect server-side conflicts via updated_at comparison
-      - resolve the server ID without an extra API round-trip
+    id and updated_at are stored so push can detect conflicts without extra lookups.
     """
     layout_entries = []
     for layout in layouts:
@@ -106,12 +73,7 @@ def build_from_api(layouts, assets):
 
 
 def lookup_by_file(manifest):
-    """
-    Return a dict mapping file path -> manifest entry for all layouts and assets.
-
-    Used by push to filter git-changed files to only manifest-tracked ones,
-    and to retrieve the stored id/updated_at for each file.
-    """
+    """Map file path -> manifest entry across layouts and assets."""
     result = {}
     for entry in manifest.get("layouts", []):
         if "file" in entry:
@@ -127,10 +89,7 @@ def lookup_by_file(manifest):
 # ------------------------------------------------------------------
 
 def load(site_dir):
-    """
-    Load manifest.json from site_dir.
-    Returns the manifest dict, or None if file does not exist.
-    """
+    """Load manifest.json from site_dir, or None if it doesn't exist."""
     path = os.path.join(site_dir, "manifest.json")
     if not os.path.isfile(path):
         return None

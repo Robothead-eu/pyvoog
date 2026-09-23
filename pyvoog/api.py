@@ -1,13 +1,4 @@
-"""
-api.py — Voog REST API client.
-
-Authentication: X-API-Token header (read from .voog).
-All requests use urllib.request (stdlib only, no dependencies).
-
-Key endpoints used:
-  GET /admin/api/layouts?per_page=250
-  GET /admin/api/assets?per_page=250&page=N
-"""
+"""Voog Admin REST API client (urllib, X-API-Token auth)."""
 
 import json
 import time
@@ -23,10 +14,7 @@ class APIError(Exception):
 
 class VoogAPI:
     def __init__(self, config, output=None):
-        """
-        config  — SiteConfig instance
-        output  — Output instance (for logging); may be None
-        """
+        """output is an optional Output used for verbose logging."""
         self._config = config
         self._out = output
 
@@ -58,13 +46,7 @@ class VoogAPI:
     # ------------------------------------------------------------------
 
     def _get(self, path, binary=False, _retry=1):
-        """
-        Perform authenticated GET request.
-
-        path    — API path (e.g. '/admin/api/layouts?per_page=250')
-        binary  — if True, return raw bytes; else parse as JSON
-        _retry  — internal; number of retries left on network error
-        """
+        """Authenticated GET; returns raw bytes if binary, else parsed JSON."""
         url = f"{self._config.base_url}{path}"
         self._log(f"GET {url}")
         req = urllib.request.Request(
@@ -98,15 +80,16 @@ class VoogAPI:
                 return self._download(url, _retry=_retry - 1)
             raise APIError(f"Failed to download {url}: {exc.reason}")
 
+    def get_json(self, path):
+        """GET any Admin API path (e.g. '/admin/api/pages/1') and parse it as JSON."""
+        return self._get(path)
+
     # ------------------------------------------------------------------
     # Layouts
     # ------------------------------------------------------------------
 
     def get_layouts(self):
-        """
-        Return all layouts/components for this site (list only, no body).
-        Paginated using per_page=250 (Voog max).
-        """
+        """List all layouts and components, without bodies. 250 is Voog's per_page max."""
         layouts = []
         page = 1
         while True:
@@ -124,10 +107,7 @@ class VoogAPI:
         return self._get(f"/admin/api/layouts/{layout_id}")
 
     def update_layout(self, layout_id, body):
-        """
-        Push new body content to a layout via PUT.
-        Returns the updated layout dict from the server.
-        """
+        """PUT a new layout body; returns the updated layout."""
         return self._put(f"/admin/api/layouts/{layout_id}", {"body": body})
 
     def _put(self, path, data, _retry=1):
@@ -172,12 +152,7 @@ class VoogAPI:
     # ------------------------------------------------------------------
 
     def get_layout_assets(self):
-        """
-        Return all layout/design assets (CSS, JS, images, fonts).
-
-        Uses /admin/api/layout_assets — these are the design template assets,
-        NOT media library uploads (which live at /admin/api/assets).
-        """
+        """List all design assets (layout_assets), not media-library uploads (/assets)."""
         assets = []
         page = 1
         while True:
@@ -191,26 +166,18 @@ class VoogAPI:
         return assets
 
     def get_layout_asset(self, asset_id):
-        """Fetch a single layout asset by ID (text assets include 'data' field)."""
+        """Fetch a single layout asset by ID (text assets include 'data')."""
         return self._get(f"/admin/api/layout_assets/{asset_id}")
 
     def update_layout_asset(self, asset_id, data):
-        """
-        Push new text content to a layout asset (CSS/JS) via PUT.
-        Returns the updated asset dict from the server.
-        """
+        """PUT new text content (CSS/JS) to a layout asset; returns the updated asset."""
         return self._put(f"/admin/api/layout_assets/{asset_id}", {"data": data})
 
     def update_layout_asset_binary(self, asset_id, filename, file_bytes, content_type=None):
-        """
-        Push new binary content to a layout asset (image/font/SVG) via multipart PUT.
-        Returns the updated asset dict from the server.
+        """Replace a binary layout asset via multipart PUT.
 
-        NB: Voog currently rejects this — a live site returns HTTP 500 for a
-        multipart PUT under any field name, including on an asset created
-        moments earlier, while multipart POST (create) works fine. Kept so the
-        call starts working if Voog adds support; push turns the failure into
-        an actionable message rather than a bare 500.
+        Voog currently answers 500 to any multipart PUT (POST works). Kept in
+        case Voog adds support; push reports the failure with guidance.
         """
         return self._put_multipart(
             f"/admin/api/layout_assets/{asset_id}",
@@ -230,12 +197,7 @@ class VoogAPI:
     # ------------------------------------------------------------------
 
     def delete_layout(self, layout_id):
-        """
-        Delete a layout/component on the server.
-
-        Voog refuses this when the layout is still assigned to a page, or when
-        the site is not on a custom design — both surface as an APIError.
-        """
+        """Delete a layout. Voog refuses if a page uses it or the site has no custom design."""
         return self._delete(f"/admin/api/layouts/{layout_id}")
 
     def delete_layout_asset(self, asset_id):
@@ -243,16 +205,10 @@ class VoogAPI:
         return self._delete(f"/admin/api/layout_assets/{asset_id}")
 
     def _delete(self, path, _retry=1, _retried=False):
-        """
-        Perform an authenticated DELETE.
+        """Authenticated DELETE; returns True (204 has no body).
 
-        A successful delete answers 204 No Content, so there is no body to
-        parse — returning True keeps callers from having to care.
-
-        _retried marks a re-sent request. If the first DELETE reached the
-        server and only its response was lost, the retry sees 404; treating
-        that as a failure would report a resource as still present when it is
-        already gone. DELETE is idempotent, so 404-after-retry is success.
+        A 404 on a retry counts as success: the first attempt may have deleted
+        the resource before its response was lost.
         """
         url = f"{self._config.base_url}{path}"
         self._log(f"DELETE {url}")
@@ -277,8 +233,7 @@ class VoogAPI:
                 return self._delete(path, _retry=_retry - 1, _retried=True)
             raise APIError(f"Network error: {exc.reason}")
         except OSError as exc:
-            # A socket read timeout is an OSError but not a URLError, so it
-            # would otherwise escape uncaught and abort the caller's whole run.
+            # Socket read timeouts are OSError, not URLError.
             raise APIError(f"Network error: {exc}")
 
     # ------------------------------------------------------------------
@@ -286,10 +241,7 @@ class VoogAPI:
     # ------------------------------------------------------------------
 
     def create_layout(self, title, content_type, body, component=False, layout_name=None):
-        """
-        Create a new layout on the server via POST.
-        Returns the created layout dict (includes id, updated_at, etc.).
-        """
+        """POST a new layout; returns the created layout."""
         data = {
             "title": title,
             "content_type": content_type,
@@ -301,13 +253,9 @@ class VoogAPI:
         return self._post("/admin/api/layouts", data)
 
     def create_layout_asset(self, filename, data=None, file_bytes=None, content_type=None):
-        """
-        Create a new layout asset on the server via POST.
+        """POST a new layout asset: data= for text, file_bytes= for binary (multipart).
 
-        For text assets (CSS/JS): pass data= with file content string.
-        For binary assets (images/fonts): pass file_bytes= with raw bytes.
-
-        Returns the created asset dict.
+        Returns the created asset.
         """
         if file_bytes is not None:
             return self._post_multipart(

@@ -1,10 +1,4 @@
-"""
-git.py — Lightweight git integration for voog-cli.
-
-Provides auto-init and auto-commit so every pull is a reversible snapshot.
-All operations call the system `git` binary via subprocess.
-Git is optional — the tool works without it, but warns.
-"""
+"""Wrapper around the system git binary: init and commit snapshots. Git is optional."""
 
 import os
 import shutil
@@ -17,26 +11,17 @@ def git_available():
 
 
 def _decode(raw):
-    """
-    Decode git output without ever raising.
+    """Decode git output without raising.
 
-    Filenames on Linux are bytes, not text, and need not be valid UTF-8 — a
-    file named café.jpg saved by a latin-1 tool is legal. surrogateescape
-    keeps those bytes recoverable, and the resulting str can still be passed
-    straight back to open() and os.path. Decoding strictly here would turn
-    one odd filename into a crash that aborts the whole command.
+    Filenames need not be valid UTF-8; surrogateescape keeps them usable with open().
     """
     return raw.decode("utf-8", errors="surrogateescape")
 
 
 def _git(*args, cwd=None):
-    """
-    Run git with the given args in cwd.
-    Returns (returncode, stdout, stderr), both streams stripped.
-    Never raises — callers check returncode.
+    """Run git in cwd; return (returncode, stdout, stderr), stripped. Never raises.
 
-    Not for NUL-separated output: use _git_z() for that, since stripping
-    would eat a leading-whitespace filename.
+    Use _git_z() for -z output: stripping would eat leading-whitespace filenames.
     """
     result = subprocess.run(
         ["git"] + list(args),
@@ -51,14 +36,9 @@ def _git(*args, cwd=None):
 
 
 def _git_z(*args, cwd=None):
-    """
-    Run a git command whose output is NUL-separated (-z) and return the
-    paths as a list.
+    """Run a -z git command and return the paths as a list ([] on failure).
 
-    Reading bytes directly rather than in text mode matters twice over: it
-    avoids a decode error on non-UTF-8 filenames, and it avoids universal
-    newline translation, which would rewrite a CR inside a filename into LF
-    and yield a path that does not exist.
+    Reads bytes, not text: text mode would translate a CR in a filename to LF.
     """
     result = subprocess.run(
         ["git"] + list(args),
@@ -71,10 +51,8 @@ def _git_z(*args, cwd=None):
 
 
 def ensure_repo(path):
-    """
-    Ensure path is a git repository.
-    If .git doesn't exist, runs `git init`.
-    Returns True if a new repo was initialised, False if it already existed.
+    """git init path unless .git exists. Returns True if a repo was created.
+
     Raises RuntimeError on failure.
     """
     if os.path.isdir(os.path.join(path, ".git")):
@@ -93,9 +71,8 @@ def has_changes(path):
 
 
 def commit_all(path, message):
-    """
-    Stage all changes (git add -A) and commit with message.
-    Returns True if a commit was made, False if there was nothing to commit.
+    """git add -A and commit. Returns False if nothing to commit.
+
     Raises RuntimeError on commit failure.
     """
     if not has_changes(path):
@@ -109,10 +86,7 @@ def commit_all(path, message):
 
 
 def last_commit_info(path):
-    """
-    Return a dict with last commit info, or None if no commits yet.
-    Keys: hash (short), message, date.
-    """
+    """Return {hash, message, date} for HEAD, or None if there are no commits."""
     code, out, _err = _git(
         "log", "-1", "--pretty=format:%h|%s|%ci", cwd=path
     )
@@ -126,55 +100,32 @@ def last_commit_info(path):
 
 
 def changed_files(path):
-    """
-    Return all files changed since the last commit (working tree vs HEAD),
-    regardless of extension or directory.
-    Returns an empty list if there is no git repo or no commits yet.
+    """Files changed in the working tree vs HEAD ([] if no repo or commits).
 
-    Uses -z (NUL-separated) rather than plain --name-only: with the default
-    core.quotepath=true git C-escapes any non-ASCII byte and wraps the path
-    in double quotes, e.g. "images/p\\303\\244rnu.jpg". Those mangled paths
-    never match a manifest entry, so the file would be silently treated as
-    an untracked developer file and skipped by push. -z emits raw paths.
+    -z avoids core.quotepath escaping of non-ASCII names, which would never
+    match manifest entries and be skipped by push.
     """
-    # --relative makes the paths relative to `path` rather than to the repo
-    # root. That is a no-op for the usual case where the site directory is
-    # the repo root, and it is what manifest.json entries look like when the
-    # site lives in a subdirectory of a larger repo. It also keeps this
-    # consistent with untracked_files(), whose output is always cwd-relative.
+    # --relative: paths match manifest.json when the site is a subdirectory
+    # of a larger repo, as untracked_files() output already does.
     return _git_z("diff", "HEAD", "--name-only", "-z", "--relative", cwd=path)
 
 
 def untracked_files(path):
-    """
-    Return files that exist locally but are not tracked by git and are not
-    ignored by .gitignore. These never show up in `git diff HEAD`, so push
-    needs them separately to be able to create brand-new files.
-    Returns an empty list if there is no git repo.
-    """
+    """Untracked, non-ignored files, which push needs to create new files ([] if no repo)."""
     return _git_z("ls-files", "--others", "--exclude-standard", "-z", cwd=path)
 
 
 def commit_files(path, files, message):
-    """
-    Stage only the specified files and commit.
+    """Stage only the given files and commit, leaving other files untracked.
 
-    files   — iterable of relative paths within the repo
-    message — commit message
-
-    Unlike commit_all(), this never stages files outside the given list,
-    so developer files in the same directories are left untracked.
-
-    Returns True if a commit was made, False if nothing to commit.
-    Raises RuntimeError on failure.
+    Returns False if nothing was staged; raises RuntimeError on commit failure.
     """
     for f in files:
         _git("add", f, cwd=path)
 
-    # Check if anything is actually staged
     code, _out, _err = _git("diff", "--cached", "--quiet", cwd=path)
     if code == 0:
-        return False  # nothing staged
+        return False
 
     code, _out, err = _git("commit", "-m", message, cwd=path)
     if code != 0:

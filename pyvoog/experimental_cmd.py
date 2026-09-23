@@ -1,12 +1,6 @@
-"""
-experimental_cmd.py — Environment comparison and copy commands.
+"""Compare and copy manifest-tracked files between two local site directories.
 
-WARNING: env-copy overwrites files in the target directory without undo.
-         Always review the diff before confirming a copy.
-
-These commands compare two local site directories using their manifest.json
-as the file list. Only manifest-tracked files (layouts, components, assets)
-are considered — unrelated files (docs, test files, etc.) are ignored.
+env-copy overwrites files in the target with no undo.
 """
 
 import filecmp
@@ -18,14 +12,7 @@ from .config import ConfigError
 
 
 def resolve_env_dir(env_arg, config, site_dir):
-    """
-    Return the local directory for a named environment.
-
-    Matches env_arg against config.env_name (→ site_dir, the current directory)
-    or config.env_peer_name (→ config.env_peer_path).
-
-    Raises ConfigError with a helpful message if unresolvable.
-    """
+    """Return the directory for env_arg (env_name or env_peer_name); ConfigError if unknown."""
     if config.env_name and env_arg == config.env_name:
         return site_dir
 
@@ -56,15 +43,10 @@ def resolve_env_dir(env_arg, config, site_dir):
 
 
 def _diff_envs(src_dir, dst_dir):
-    """
-    Compare manifest-tracked files between two local directories.
+    """Compare manifest-tracked files between two directories.
 
-    Returns a dict:
-        different — files present in both but with differing content
-        only_src  — files in src manifest absent or missing locally in dst
-        only_dst  — files in dst manifest not tracked in src
-        same      — files with identical content
-        errors    — list of (side, path, message) for unreadable files
+    Returns a dict of lists: different, only_src, only_dst, same, and
+    errors as (side, path, message).
     """
     src_manifest = mf.load(src_dir)
     dst_manifest = mf.load(dst_dir)
@@ -164,7 +146,7 @@ def env_diff(src_dir, dst_dir, src_name, dst_name, out, verbose=False):
 
 
 def _copy_files(files, src_dir, dst_dir, out):
-    """Copy a list of relative paths from src_dir to dst_dir. Returns (succeeded, failed)."""
+    """Copy relative paths from src_dir to dst_dir. Returns (succeeded, failed)."""
     succeeded = []
     failed = []
     for rel in files:
@@ -182,11 +164,7 @@ def _copy_files(files, src_dir, dst_dir, out):
 
 
 def _select_files(to_copy, out):
-    """
-    Prompt the user to accept or skip each file individually.
-
-    Returns the list of files the user chose to copy, or None on abort (q).
-    """
+    """Ask y/n/q per file. Returns the chosen files, or None on Ctrl-C/EOF."""
     chosen = []
     out.info("")
     for rel in to_copy:
@@ -204,16 +182,7 @@ def _select_files(to_copy, out):
 
 
 def env_copy(src_dir, dst_dir, src_name, dst_name, dry_run, out):
-    """
-    Copy changed files from src to dst.
-
-    Shows the diff, then asks:
-      y        — copy all differing files
-      n/Enter  — abort
-      s        — select file by file (y/n/q per file)
-
-    Does not commit or push anything.
-    """
+    """Show the diff, then copy changed files from src to dst after confirmation."""
     if not mf.load(src_dir):
         out.error(f"No manifest.json found in source directory: {src_dir}")
         out.info("Run  pyvoog pull  from the source environment to generate one.")
@@ -253,7 +222,7 @@ def env_copy(src_dir, dst_dir, src_name, dst_name, dry_run, out):
             return 0
         to_copy = chosen
     elif answer in ("y", "yes"):
-        pass  # copy all
+        pass
     else:
         out.info("Aborted.")
         return 0
@@ -269,11 +238,7 @@ def env_copy(src_dir, dst_dir, src_name, dst_name, dry_run, out):
 
 
 def _check_peer_dir(peer_path, peer_name, out):
-    """
-    Validate that peer_path looks like a working Voog site directory.
-    Checks: directory exists, .voog present, manifest.json present.
-    Prints a result line for each check. Returns True if all pass.
-    """
+    """Check peer_path has .voog and manifest.json. Returns True if all checks pass."""
     out.info(f"\nChecking peer environment [{peer_name}] at: {peer_path}")
 
     checks = [
@@ -303,10 +268,7 @@ def _check_peer_dir(peer_path, peer_name, out):
 
 
 def env_setup(site_dir, voog_file, config, out):
-    """
-    Interactive wizard to configure env_name, env_peer_name, env_peer_path
-    in the .voog file. Validates the peer directory after saving.
-    """
+    """Prompt for env settings, save them to .voog and validate the peer directory."""
     from .config import update_env_config
 
     out.info("pyvoog experimental env-setup")

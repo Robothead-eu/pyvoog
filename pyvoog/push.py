@@ -1,16 +1,7 @@
-"""
-push.py — Push locally modified layouts and text assets to the Voog server.
+"""Push locally modified layouts and assets to the Voog server.
 
-Change detection:  git diff HEAD filtered against manifest.json entries.
-Conflict detection: server updated_at vs manifest updated_at — if the server
-                    was modified after our last pull, we skip and warn.
-
-Safety rules:
-  - Only files present in manifest.json are eligible for push.
-    Developer files in the same directories are silently ignored.
-  - Binary assets (images/fonts/SVGs) are pushed via multipart PUT.
-  - Creating new remote files is not yet supported; files absent from the
-    server get a clear error with a suggested remedy.
+Only manifest.json files are pushed. A file whose server updated_at differs
+from the manifest's is a conflict and is skipped unless forced.
 """
 
 import os
@@ -24,10 +15,9 @@ TEXT_ASSET_TYPES = frozenset(("stylesheet", "javascript"))
 
 
 def _create_from_entry(api, site_dir, rel_path, entry, dry_run, out):
-    """
-    Re-create a server resource using its manifest entry + local file content.
-    Used when a file is tracked in manifest.json but no longer exists on the server.
-    Returns the server response dict on success, or None on failure.
+    """Re-create a manifest-tracked file that is missing on the server.
+
+    Returns the server response dict, or None on failure.
     """
     is_layout = rel_path.startswith(("layouts/", "components/"))
     abs_path = os.path.join(site_dir, rel_path)
@@ -72,22 +62,11 @@ def _create_from_entry(api, site_dir, rel_path, entry, dry_run, out):
 
 
 def push(api, site_dir, files=None, dry_run=False, force=False, create=False, out=None):
-    """
-    Push locally modified files to the Voog server.
+    """Push locally modified files to the Voog server.
 
-    api      — VoogAPI instance
-    site_dir — absolute path to the site directory
-    files    — optional list of specific relative paths to push;
-               if None, candidates are determined by git diff HEAD
-    dry_run  — show what would be pushed but don't upload
-    force    — skip conflict check; overwrite server even when its
-               updated_at is newer than the manifest
-    create   — when True, files not in manifest.json are created on the
-               server and added to the manifest; files in manifest but
-               absent from the server are also re-created
-
-    Only files that appear in manifest.json are pushed (unless create=True).
-    Returns (succeeded, failed) lists of relative paths.
+    files: relative paths to push; None means git-changed manifest files.
+    create: also create files missing from the manifest or the server.
+    Returns (succeeded, failed).
     """
     succeeded = []
     failed = []
@@ -109,15 +88,14 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
 
     # -- Determine candidates -----------------------------------------
 
-    to_create = []       # files not in manifest that will be created (--create)
-    swept_creates = []   # subset of to_create found by scanning, not named
-    skipped_creates = [] # local-only files --create refused to publish
+    to_create = []
+    swept_creates = []   # found by scanning, not named by the user
+    skipped_creates = []
 
     if files:
-        # Explicit file list from the command line
         candidates = []
         for f in files:
-            f = f.replace("\\", "/")  # normalise Windows paths
+            f = f.replace("\\", "/")
             if f in by_file:
                 candidates.append(f)
             elif create:
@@ -129,7 +107,6 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
                     "Use --create to create it on the server."
                 )
     else:
-        # git diff HEAD ∩ manifest
         if not git.git_available():
             out and out.error(
                 "git is not available — cannot detect changed files. "
@@ -141,20 +118,15 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
         candidates = [f for f in changed if f in by_file]
 
         if create:
-            # Brand-new files are untracked, and `git diff HEAD` never lists
-            # untracked files — so without this, `push --create` with no file
-            # arguments could never create anything, which is its whole point.
-            #
-            # Only untracked files count as new. `changed` also lists files
-            # that were *deleted*, and offering to "create" a file that is no
-            # longer on disk just produces a guaranteed failure.
+            # `git diff HEAD` omits untracked files, so scan them separately.
+            # Use only untracked files: `changed` also lists deleted ones.
             from .new_cmd import _classify_file, is_publishable
 
             for f in git.untracked_files(site_dir):
                 if f in by_file or f == "manifest.json":
                     continue
                 if not _classify_file(f):
-                    continue           # not in a site directory at all
+                    continue
                 if not os.path.isfile(os.path.join(site_dir, f)):
                     continue
                 if is_publishable(f):
@@ -164,7 +136,6 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
 
             to_create.extend(swept_creates)
 
-        # Log skipped developer files (verbose only)
         skipped_dev = [
             f for f in changed
             if f not in by_file and f != "manifest.json" and f not in to_create
@@ -204,18 +175,14 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
             out and out.info(f"  + {f}")
     out and out.info("")
 
-    # Files the user named are taken as intended. Files we found by scanning
-    # the working tree are not: creating them publishes new pages to a live
-    # site, so confirm first, the same way `pyvoog new --all` does.
+    # Scanned (not named) files would publish to a live site, so confirm first.
     if swept_creates and not dry_run:
         try:
             answer = input(
                 f"Create {len(swept_creates)} new file(s) on the server? [y/N] "
             ).strip().lower()
         except EOFError:
-            # No TTY (a script or CI run). Decline the creates, but still do
-            # the ordinary push — aborting everything would mean a scripted
-            # `push --create` silently uploads nothing at all.
+            # No TTY: decline the creates but still push existing files.
             answer = "n"
             out and out.info("")
         except KeyboardInterrupt:
@@ -230,11 +197,6 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
             swept_creates = []
 
     # -- Fetch server state for conflict detection --------------------
-    #
-    # We fetch the full layout/asset lists (lightweight — no bodies).
-    # This gives us the current server updated_at and the server IDs.
-    # We compare server updated_at vs the updated_at stored in our manifest
-    # (recorded at last pull) to detect if someone edited on the server.
 
     out and out.info("Checking server state…")
 
@@ -242,7 +204,7 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
     has_layouts = any(f.startswith(("layouts/", "components/")) for f in checked)
     has_assets  = any(not f.startswith(("layouts/", "components/")) for f in checked)
 
-    server_by_file = {}  # {rel_path: {"id": int, "updated_at": str}}
+    server_by_file = {}  # {rel_path: {"id", "updated_at"}}
 
     if has_layouts:
         try:
@@ -284,7 +246,6 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
 
         out and out.progress(i, total, rel_path)
 
-        # File in manifest but absent on server
         if server_info is None:
             out and out.progress_done()
             if create:
@@ -310,7 +271,6 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
                 failed.append((rel_path, "not on server"))
             continue
 
-        # Conflict check: has the server been edited since our last pull?
         manifest_ts = entry.get("updated_at", "")
         server_ts   = server_info.get("updated_at", "")
         if not force and manifest_ts and server_ts and manifest_ts != server_ts:
@@ -333,7 +293,6 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
             succeeded.append(rel_path)
             continue
 
-        # Read local content
         abs_path   = os.path.join(site_dir, rel_path)
         is_layout  = rel_path.startswith(("layouts/", "components/"))
         asset_type = entry.get("asset_type", "")
@@ -351,7 +310,6 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
             failed.append((rel_path, str(exc)))
             continue
 
-        # Upload
         try:
             if is_layout:
                 resp = api.update_layout(server_info["id"], content)
@@ -364,7 +322,6 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
                     server_info["id"], filename, content, content_type
                 )
 
-            # Capture the new server timestamp so next push doesn't conflict
             new_ts = (resp or {}).get("updated_at", "")
             if new_ts:
                 entry["updated_at"] = new_ts
@@ -375,11 +332,8 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
         except APIError as exc:
             out and out.progress_done()
             if is_binary:
-                # Verified against a live site: PUT /admin/api/layout_assets/:id
-                # returns 500 for a multipart body regardless of the field name,
-                # and for a freshly created asset too, while multipart POST
-                # (create) succeeds. Voog simply cannot replace binary asset
-                # content over the API, so a bare "HTTP 500" is misleading.
+                # Voog returns 500 for any multipart PUT to layout_assets/:id;
+                # binary content can only be created (POST), not replaced.
                 out and out.warn(
                     f"Cannot replace {rel_path} — Voog's API does not support "
                     f"updating binary assets ({exc}). Re-upload it in the Voog "
@@ -417,10 +371,8 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
                 failed.append((rel_path, "unknown type"))
                 continue
 
-            # Already on the server? Creating it again would make a duplicate
-            # layout, or fail on the asset filename uniqueness rule. This
-            # happens whenever manifest.json is stale — someone added the file
-            # in the Voog editor, or the manifest was never pulled.
+            # Stale manifest: creating again would duplicate the layout or
+            # hit the asset filename uniqueness rule.
             if rel_path in server_by_file:
                 out and out.warn(
                     f"{rel_path}: already exists on the server — not creating a "
@@ -440,7 +392,6 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
                 continue
 
             if not dry_run:
-                # Add the new resource to the in-memory manifest
                 if kind in ("layout", "component"):
                     name = os.path.splitext(info["filename"])[0]
                     new_entry = {
@@ -472,11 +423,8 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
 
     # -- Refresh manifest timestamps after push -----------------------
     #
-    # The PUT response may not include `updated_at`, or its format may
-    # differ from what GET /admin/api/layouts returns.  Either way the
-    # manifest would keep the pre-push timestamp, causing a false
-    # "conflict" on every subsequent push.  Re-fetching the list gives
-    # us the authoritative post-push timestamps in one round-trip.
+    # The PUT response's updated_at may be missing or formatted differently
+    # from the list endpoint, which would cause false conflicts next push.
 
     if not dry_run and succeeded:
         pushed_layout_files = {f for f in succeeded
@@ -523,7 +471,6 @@ def push(api, site_dir, files=None, dry_run=False, force=False, create=False, ou
     # -- Save manifest + auto-commit pushed files ---------------------
 
     if not dry_run and succeeded:
-        # Write back any updated_at timestamps (refreshed above or from PUT response)
         if manifest_dirty:
             from .manifest import save as save_manifest
             try:

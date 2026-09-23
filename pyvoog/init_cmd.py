@@ -1,12 +1,6 @@
-"""
-init_cmd.py — Initialise a new Voog site directory.
+"""Initialise a site directory: .voog, a .gitignore that excludes it, and git init.
 
-Creates:
-  <dir>/.voog        — site config (host, api_token)
-  <dir>/.gitignore   — excludes .voog token from git
-  <dir>/             — git init
-
-Existing directories are supported (add .voog to an existing clone).
+Works on existing directories too.
 """
 
 import os
@@ -20,6 +14,10 @@ SITE_GITIGNORE = """\
 
 # API token — never commit this
 .voog
+
+# Local content copy (pyvoog pull content) — never commit this
+.voog-content/
+.voog-content.*/
 
 # Node / build tools
 node_modules/
@@ -44,21 +42,15 @@ VOOG_IGNORE_RULE = """
 
 
 def _ignores_voog(gitignore_text):
-    """
-    Return True if the .gitignore text already has a rule covering the .voog
-    *file*.
+    """Return True if the .gitignore text has a rule ignoring the .voog file.
 
-    Only '.voog' and '/.voog' count. A trailing slash makes a pattern match
-    directories only — git does not ignore a regular file named .voog given
-    a '.voog/' rule — so those must not count, or the token silently stays
-    committable. A substring test would likewise be fooled by an unrelated
-    entry such as '.voog-cache/'.
+    Only '.voog' and '/.voog' count: '.voog/' matches directories only.
     """
     for line in gitignore_text.splitlines():
         rule = line.strip()
         if not rule or rule.startswith("#") or rule.startswith("!"):
             continue
-        if rule.endswith("/"):      # directory-only pattern, not our file
+        if rule.endswith("/"):
             continue
         if rule.lstrip("/") == ".voog":
             return True
@@ -67,16 +59,7 @@ def _ignores_voog(gitignore_text):
 
 
 def init(target_dir, host, api_token, protocol="https", out=None):
-    """
-    Initialise a site directory.
-
-    target_dir — directory to initialise (created if it doesn't exist)
-    host       — e.g. 'mysite.voog.com'
-    api_token  — Voog API token
-    protocol   — 'https' (default) or 'http'
-
-    Returns True on success. Prints progress via out (Output instance).
-    """
+    """Initialise target_dir (created if missing). Returns True on success."""
     abs_dir = os.path.abspath(target_dir)
 
     # -- Create directory if needed ------------------------------------
@@ -103,19 +86,14 @@ def init(target_dir, host, api_token, protocol="https", out=None):
 
     # -- Write .gitignore ----------------------------------------------
     #
-    # An existing .gitignore is never overwritten, but the .voog rule must
-    # still be added — otherwise the API token sits in a committable file
-    # and the very next `git add -A` puts it in history. Adding pyvoog to an
-    # existing site directory is a documented workflow, and such directories
-    # almost always already have a .gitignore.
+    # An existing .gitignore is kept, but must still ignore .voog so the token
+    # can't be committed.
 
     gitignore_path = os.path.join(abs_dir, ".gitignore")
     if os.path.isfile(gitignore_path):
         try:
-            # errors="replace": a latin-1 .gitignore (common in older
-            # European repos) must not abort init and leave the freshly
-            # written token un-ignored. We only ever append, so a lossy
-            # read cannot corrupt the file.
+            # errors="replace": a latin-1 .gitignore must not abort init.
+            # We only append, so a lossy read is safe.
             with open(gitignore_path, encoding="utf-8", errors="replace") as f:
                 existing = f.read()
         except OSError as exc:

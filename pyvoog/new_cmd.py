@@ -1,16 +1,4 @@
-"""
-new_cmd.py — Create new layouts and assets on the Voog server.
-
-Supports:
-  pyvoog new <file>            — create a single file on the server
-  pyvoog new --all [--dry-run] — find all local-only files and create them
-
-Layout content_type defaults:
-  layouts/    → content_type='page',      component=False
-  components/ → content_type='component', component=True
-
-Override with --type for special layouts (blog, blog_article, etc.).
-"""
+"""Create new layouts and assets on the Voog server (`pyvoog new`)."""
 
 import os
 import re
@@ -25,7 +13,6 @@ from .manifest import (
 
 TEXT_ASSET_TYPES = frozenset(("stylesheet", "javascript"))
 
-# Map local directory → asset_type for the API
 DIR_TO_ASSET_TYPE = {
     "stylesheets": "stylesheet",
     "javascripts": "javascript",
@@ -33,7 +20,6 @@ DIR_TO_ASSET_TYPE = {
     "assets": "unknown",
 }
 
-# MIME types for common extensions
 EXTENSION_CONTENT_TYPES = {
     ".css": "text/css",
     ".js": "text/javascript",
@@ -53,15 +39,10 @@ EXTENSION_CONTENT_TYPES = {
 
 
 def _classify_file(rel_path):
-    """
-    Classify a file path into its type.
+    """Classify a relative path by its top-level site directory.
 
-    Returns a dict:
-      kind       — 'layout', 'component', or 'asset'
-      rel_path   — normalised relative path
-      filename   — just the filename part
-      dir        — the directory prefix (layouts, components, stylesheets, etc.)
-    Or None if the path doesn't match a known directory.
+    Returns {kind, rel_path, filename, dir}, kind being 'layout', 'component'
+    or 'asset'; None if the directory is not a site directory.
     """
     rel_path = rel_path.replace("\\", "/")
     parts = rel_path.split("/", 1)
@@ -79,10 +60,9 @@ def _classify_file(rel_path):
     return None
 
 
-# Editor/tool leftovers that must never be created on a live site.
 _JUNK_SUFFIXES = (".bak", ".orig", ".rej", ".swp", ".swo", ".tmp")
 
-# Ruby kit: SVG counts as an asset, not an image.
+# As in the Ruby kit, SVG is an asset, not an image.
 _IMAGE_EXTENSIONS = frozenset(
     (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".avif",
      ".tif", ".tiff", ".heic", ".heif")
@@ -90,24 +70,16 @@ _IMAGE_EXTENSIONS = frozenset(
 
 
 def is_publishable(rel_path):
-    """
-    Return True if rel_path is a file worth offering to create on the server.
+    """Return True if a scanned file may be created on the server.
 
-    Bulk operations (new --all, push --create) scan whole directories, so
-    without this they offer .DS_Store, vim swap files and editor backups as
-    real layouts. The per-folder extension rules mirror the Ruby kit's
-    valid_for_folder? — the server only accepts pure .tpl/.css/.js anyway.
-
-    Explicitly named files (pyvoog new <file>) deliberately bypass this: if
-    the user names a file, trust them.
+    Used by bulk creates only; explicitly named files bypass it. Folder rules
+    mirror the Ruby kit's valid_for_folder?.
     """
     info = _classify_file(rel_path)
     if not info:
         return False
 
-    # Voog's namespace is flat — an asset is served from /stylesheets/<name>
-    # and a layout is addressed by a bare layout_name — so a nested path has
-    # no representation on the server. Creating one yields a layout literally
+    # Voog names are flat; a nested path would create a layout literally
     # named "partials/nested".
     if "/" in info["filename"]:
         return False
@@ -115,7 +87,7 @@ def is_publishable(rel_path):
     basename = os.path.basename(info["filename"])
     if basename.startswith("."):          # .DS_Store, .page.tpl.swp
         return False
-    if basename.endswith("~"):            # editor backups
+    if basename.endswith("~"):
         return False
 
     lower = basename.lower()
@@ -124,7 +96,7 @@ def is_publishable(rel_path):
 
     directory = info["dir"]
     if directory in ("layouts", "components"):
-        # Ruby: /\A[^\.]+\.tpl\z/ — exactly one dot, and it is .tpl
+        # Exactly one dot, and it is .tpl (Ruby kit rule).
         return re.fullmatch(r"[^.]+\.tpl", basename) is not None
     if directory == "stylesheets":
         return lower.endswith(".css")
@@ -132,18 +104,17 @@ def is_publishable(rel_path):
         return lower.endswith(".js")
     if directory == "images":
         return os.path.splitext(lower)[1] in _IMAGE_EXTENSIONS
-    # assets/: fonts, SVG, anything else the site needs
     return True
 
 
 def _guess_content_type(filename):
-    """Guess MIME content type from file extension."""
+    """Guess a MIME type from the file extension."""
     ext = os.path.splitext(filename)[1].lower()
     return EXTENSION_CONTENT_TYPES.get(ext, "application/octet-stream")
 
 
 def _is_text_asset_dir(directory):
-    """Return True if the directory holds text-editable assets."""
+    """Return True if the directory holds text assets."""
     return directory in ("stylesheets", "javascripts")
 
 
@@ -166,7 +137,6 @@ def _create_layout(api, site_dir, info, content_type_override=None, dry_run=Fals
         title = name.replace("_", " ").capitalize()
         content_type = content_type_override or "page"
 
-    # Read local body
     try:
         with open(abs_path, encoding="utf-8") as f:
             body = f.read()
@@ -209,14 +179,12 @@ def _create_asset(api, site_dir, info, dry_run=False, out=None):
 
     try:
         if _is_text_asset_dir(info["dir"]):
-            # Text asset — send content as string
             with open(abs_path, encoding="utf-8") as f:
                 data = f.read()
             result = api.create_layout_asset(
                 filename=filename, data=data, content_type=content_type,
             )
         else:
-            # Binary asset — send raw bytes via multipart
             with open(abs_path, "rb") as f:
                 file_bytes = f.read()
             result = api.create_layout_asset(
@@ -234,7 +202,7 @@ def _create_asset(api, site_dir, info, dry_run=False, out=None):
 # ------------------------------------------------------------------
 
 def _report_skipped(skipped, out):
-    """Tell the user which local-only files were not offered, and why."""
+    """Report local-only files that were not offered for creation."""
     if not skipped or not out:
         return
     out.info(f"\n{len(skipped)} local file(s) skipped (not publishable to Voog):")
@@ -250,14 +218,10 @@ def _report_skipped(skipped, out):
 
 
 def _find_new_files(site_dir, server_layout_paths, server_asset_paths):
-    """
-    Scan local directories for files that exist locally but not on the server.
+    """Find local files that are not on the server.
 
-    Returns (new_files, skipped) where new_files is a list of classified file
-    info dicts and skipped is a list of relative paths that look local-only
-    but are not publishable (editor leftovers, .scss, an SVG under images/).
-    Skipped paths are reported rather than dropped silently — a file that
-    quietly never reaches the server is worse than one that is refused.
+    Returns (new_files, skipped): _classify_file dicts, and relative paths
+    that are not publishable.
     """
     new_files = []
     skipped = []
@@ -276,7 +240,6 @@ def _find_new_files(site_dir, server_layout_paths, server_asset_paths):
             if not info:
                 continue
 
-            # Already on the server? Then it is neither new nor skipped.
             if info["kind"] in ("layout", "component"):
                 if rel_path in server_layout_paths:
                     continue
@@ -296,10 +259,7 @@ def _find_new_files(site_dir, server_layout_paths, server_asset_paths):
 # ------------------------------------------------------------------
 
 def new_single(api, site_dir, file_path, content_type_override=None, dry_run=False, out=None):
-    """
-    Create a single new file on the server.
-    Returns True on success, False on failure.
-    """
+    """Create a single new file on the server. Returns True on success."""
     rel_path = file_path.replace("\\", "/")
     abs_path = os.path.join(site_dir, rel_path)
 
@@ -315,7 +275,6 @@ def new_single(api, site_dir, file_path, content_type_override=None, dry_run=Fal
         )
         return False
 
-    # Create on server
     if info["kind"] in ("layout", "component"):
         result = _create_layout(api, site_dir, info, content_type_override, dry_run, out)
     else:
@@ -327,17 +286,12 @@ def new_single(api, site_dir, file_path, content_type_override=None, dry_run=Fal
     if dry_run:
         return True
 
-    # Update manifest
     _update_manifest_after_create(api, site_dir, out)
     return True
 
 
 def list_new(api, site_dir, out=None):
-    """
-    List local files that don't exist on the server.
-    Fast — only compares file paths, no content fetching.
-    Returns the list of info dicts.
-    """
+    """List local files not on the server. Returns _classify_file dicts."""
     out and out.info("Fetching server layouts...")
     try:
         server_layouts = api.get_layouts()
@@ -381,15 +335,13 @@ def list_new(api, site_dir, out=None):
 
 
 def new_all(api, site_dir, dry_run=False, out=None):
-    """
-    Find all local files not on the server and create them.
-    Asks for confirmation before proceeding.
-    Returns (succeeded, failed) lists.
+    """Create all local files not on the server, after confirmation.
+
+    Returns (succeeded, failed).
     """
     succeeded = []
     failed = []
 
-    # Fetch server state
     out and out.info("Fetching server layouts...")
     try:
         server_layouts = api.get_layouts()
@@ -404,7 +356,6 @@ def new_all(api, site_dir, dry_run=False, out=None):
         out and out.error(f"Could not fetch assets: {exc}")
         return succeeded, failed
 
-    # Build sets of server file paths
     server_layout_paths = set()
     for lay in server_layouts:
         name = lay.get("layout_name", "")
@@ -417,7 +368,6 @@ def new_all(api, site_dir, dry_run=False, out=None):
             asset_file_path(asset.get("filename", ""), asset.get("asset_type", ""))
         )
 
-    # Find new local files
     new_files, skipped = _find_new_files(
         site_dir, server_layout_paths, server_asset_paths
     )
@@ -427,7 +377,6 @@ def new_all(api, site_dir, dry_run=False, out=None):
         out and out.info("No new local files to create on the server.")
         return succeeded, failed
 
-    # Show what will be created
     out and out.info(f"\n{len(new_files)} new file(s) to create on server:")
     for info in new_files:
         kind_label = info["kind"]
@@ -437,7 +386,6 @@ def new_all(api, site_dir, dry_run=False, out=None):
         out and out.info(f"\n[dry-run] Would create {len(new_files)} file(s).")
         return [f["rel_path"] for f in new_files], failed
 
-    # Ask for confirmation
     out and out.info("")
     try:
         answer = input("Proceed? [y/N] ").strip().lower()
@@ -449,7 +397,6 @@ def new_all(api, site_dir, dry_run=False, out=None):
         out and out.info("Aborted.")
         return succeeded, failed
 
-    # Create each file
     out and out.info("")
     for info in new_files:
         if info["kind"] in ("layout", "component"):
@@ -462,7 +409,6 @@ def new_all(api, site_dir, dry_run=False, out=None):
         else:
             failed.append(info["rel_path"])
 
-    # Update manifest once after all creates
     if succeeded:
         _update_manifest_after_create(api, site_dir, out)
 
@@ -470,7 +416,7 @@ def new_all(api, site_dir, dry_run=False, out=None):
 
 
 def _update_manifest_after_create(api, site_dir, out):
-    """Re-fetch server state and rebuild manifest after creating files."""
+    """Rebuild manifest.json from the server after creating files."""
     try:
         layouts = api.get_layouts()
         assets = api.get_layout_assets()

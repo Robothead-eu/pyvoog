@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
-"""
-pyvoog.py — Voog CMS command-line tool.
+"""pyvoog: Voog CMS command-line tool, a Python replacement for the Ruby voog-kit.
 
-A reliable Python replacement for the Ruby voog-kit.
-Pulls site templates and assets directly via the Voog REST API.
-
-Usage:
-    python pyvoog.py <command> [options]
-
-Run  python pyvoog.py help  for the full command reference.
+Run  python pyvoog.py help  for the command reference.
 """
 
 import argparse
@@ -58,6 +51,15 @@ COMMANDS
           python pyvoog.py pull components/footer-popup.tpl
           python pyvoog.py pull --dry-run
           python pyvoog.py pull --reset
+
+  pull content [--published-only] [--dry-run]
+      Pull site content (pages, articles, products, ...) into .voog-content/
+      for voog-server. Includes unpublished content unless --published-only.
+      Off by default: enable with  content_pull=true  in .voog.
+
+      Examples:
+          python pyvoog.py pull content
+          python pyvoog.py pull content --published-only
 
   check
       Compare local files against the server without writing anything.
@@ -162,6 +164,7 @@ FILES
     .voog        — Site config (host, api_token). Never commit this file.
     .gitignore   — Created by  pyvoog init  to exclude .voog from git.
     manifest.json — Updated automatically on every pull.
+    .voog-content/ — Site content from  pull content  (gitignored).
 """.format(version=__version__)
 
 COMMAND_HELP = {
@@ -182,6 +185,7 @@ Examples:
 """,
     "pull": """\
 pyvoog pull [layouts|assets|FILE ...] [--dry-run] [--reset]
+pyvoog pull content [--published-only] [--dry-run]
 
 Pull layouts, components, and design assets from the Voog server.
 Server content always overwrites local files.
@@ -193,11 +197,20 @@ Targets (optional):
     layouts   Pull only layouts and components
     assets    Pull only design assets
     FILE ...  Pull only the given file path(s), e.g. components/footer.tpl
+    content   Pull the site's content into .voog-content/ instead (see below)
 
 Arguments:
     --dry-run Show what would be written without writing anything
     --reset   Also remove local .tpl files not present on the server
               (ignored when pulling specific files)
+    --published-only
+              With 'content': leave out unpublished pages and articles and
+              non-live products
+
+Content pull (off by default — enable with  content_pull=true  in .voog):
+    Writes the site's content as raw API JSON to .voog-content/ for
+    voog-server. Emails, bank details and tokens are removed. The folder
+    is gitignored and never committed.
 
 Examples:
     python pyvoog.py pull
@@ -206,6 +219,8 @@ Examples:
     python pyvoog.py pull layouts/page.tpl stylesheets/main.css
     python pyvoog.py pull --dry-run
     python pyvoog.py pull --reset
+    python pyvoog.py pull content
+    python pyvoog.py pull content --published-only
 """,
     "check": """\
 pyvoog check
@@ -355,9 +370,17 @@ def cmd_pull(args, out, config, site_dir):
 
     api = VoogAPI(config, output=out)
 
-    # The positional accepts either a subset keyword ('layouts'/'assets')
-    # or one or more specific file paths.
     targets = args.targets or []
+
+    if "content" in targets:
+        if len(targets) > 1:
+            out.error("'pull content' can't be combined with other targets.")
+            return 1
+        return cmd_pull_content(args, out, config, site_dir, api)
+    if args.published_only:
+        out.error("--published-only only applies to  pyvoog pull content.")
+        return 1
+
     subset = None
     files = None
     if len(targets) == 1 and targets[0] in ("layouts", "assets"):
@@ -387,9 +410,7 @@ def cmd_pull(args, out, config, site_dir):
 
     out.summary(succeeded, failed, dry_run=dry_run)
 
-    # Auto-commit after a real pull — stage only the pulled files + manifest.
-    # Using commit_files() instead of commit_all() so developer files in the
-    # same directories are never accidentally staged.
+    # Stage only pulled files + manifest, never unrelated developer files.
     if not dry_run and succeeded:
         if not git.git_available():
             out.warn("git not found — skipping auto-commit.")
@@ -414,6 +435,37 @@ def cmd_pull(args, out, config, site_dir):
                 out.warn(f"Git error: {exc}")
 
     return 1 if failed else 0
+
+
+def cmd_pull_content(args, out, config, site_dir, api):
+    from pyvoog.content import pull_content
+
+    if config.content_pull is not True:
+        if config.content_pull is False:
+            reason = (f"Content pull is not enabled for {config.host}.\n"
+                      "It includes unpublished drafts, so it is off by default.")
+        else:
+            reason = f"Invalid content_pull value in .voog: {config.content_pull!r}."
+        out.error(
+            f"{reason}\nTo enable it, set this in the [{config.section}] "
+            "section of .voog (add the line if it is missing):\n\n"
+            "    content_pull=true"
+        )
+        return 1
+
+    if args.reset:
+        out.warn("--reset is ignored for  pull content.")
+    if args.dry_run:
+        out.info("(dry-run mode — no files will be written)\n")
+
+    # No git commit: .voog-content/ is gitignored by design.
+    ok = pull_content(
+        api, config, site_dir,
+        published_only=args.published_only,
+        dry_run=args.dry_run,
+        out=out,
+    )
+    return 0 if ok else 1
 
 
 def cmd_check(args, out, config, site_dir):
@@ -473,7 +525,7 @@ def cmd_push(args, out, config, site_dir):
 
     api = VoogAPI(config, output=out)
 
-    files   = args.files or None   # [] from argparse → treat as None (auto-detect)
+    files   = args.files or None   # [] means auto-detect
     dry_run = args.dry_run
     force   = args.force
     create  = args.create
@@ -607,7 +659,6 @@ def cmd_experimental(args, out, config, site_dir):
         return env_copy(src_dir, dst_dir, args.source, args.target,
                         args.dry_run, out)
 
-    # No subcommand — print mini-help
     out.info("""\
 pyvoog experimental — experimental features (use with care)
 
@@ -687,14 +738,18 @@ def build_parser():
     # pull
     p_pull = sub.add_parser("pull", help="Pull files from the server")
     p_pull.add_argument("targets", nargs="*", default=[],
-                        metavar="[layouts|assets|FILE ...]",
-                        help="Pull only 'layouts', only 'assets', or specific "
-                             "file path(s) like components/footer.tpl "
-                             "(default: everything)")
+                        metavar="[layouts|assets|content|FILE ...]",
+                        help="Pull only 'layouts', only 'assets', specific "
+                             "file path(s) like components/footer.tpl, or "
+                             "'content' into .voog-content/ "
+                             "(default: all layouts and assets)")
     p_pull.add_argument("--dry-run", action="store_true",
                         help="Show what would be written without writing")
     p_pull.add_argument("--reset", action="store_true",
                         help="Also remove local files not on the server")
+    p_pull.add_argument("--published-only", action="store_true",
+                        help="With 'content': skip unpublished pages, "
+                             "articles and non-live products")
 
     # check
     sub.add_parser("check", help="Compare local files against the server")
@@ -809,12 +864,7 @@ def build_parser():
 # ------------------------------------------------------------------
 
 def _resolve_site_dir(args):
-    """
-    Determine the site directory from context.
-    For 'init', it's args.dir (or cwd if not given — handled in cmd_init).
-    For all other commands, walk up from cwd to find .voog.
-    Returns (site_dir, config) or raises ConfigError.
-    """
+    """Return the directory of the nearest .voog above cwd, else cwd."""
     from pyvoog.config import find_voog_file
     voog_file = find_voog_file()
     if voog_file:
@@ -823,9 +873,8 @@ def _resolve_site_dir(args):
 
 
 def _pre_extract_globals(argv):
-    """
-    Extract --verbose/-v and --site anywhere in the arg list before argparse,
-    so users can write `voog pull --verbose` or `voog --verbose pull`.
+    """Pull --verbose/-v and --site from anywhere in argv so they work after the command.
+
     Returns (verbose, site, cleaned_argv).
     """
     verbose = False
@@ -853,14 +902,12 @@ def main():
     parser = build_parser()
     args = parser.parse_args(cleaned_argv)
 
-    # Merge pre-extracted globals onto the namespace
     args.verbose = verbose
     if not getattr(args, "site", None):
         args.site = site_pre
 
     out = Output(verbose=args.verbose)
 
-    # No command → print help
     if not args.command:
         out.info(HELP_TEXT)
         sys.exit(0)
@@ -871,7 +918,6 @@ def main():
     if args.command == "init":
         sys.exit(cmd_init(args, out))
 
-    # All other commands need a site config
     site_dir = _resolve_site_dir(args)
     try:
         config = load_config(site_dir=site_dir, site_name=args.site)

@@ -1,12 +1,6 @@
-"""
-pull.py -- Pull layouts and design assets from the Voog API to disk.
+"""Pull layouts and design assets from the Voog API to disk.
 
-Layouts: text content from layout.body -> written as UTF-8 .tpl files.
-Assets:  CSS/JS as text (from API 'data' field), images/fonts as binary
-         (downloaded from public_url). Uses /admin/api/layout_assets.
-
-The server is always the source of truth -- local files are overwritten.
-Use git to review/undo changes after a pull.
+The server is the source of truth: local files are overwritten.
 """
 
 TEXT_ASSET_TYPES = frozenset(("stylesheet", "javascript"))
@@ -42,19 +36,12 @@ def _write_binary(abs_path, data, dry_run=False):
 # ------------------------------------------------------------------
 
 def pull(api, site_dir, subset=None, files=None, dry_run=False, reset=False, out=None):
-    """
-    Pull layouts and/or assets from the Voog API.
+    """Pull layouts and/or assets from the Voog API.
 
-    api      -- VoogAPI instance
-    site_dir -- absolute path to the site directory
-    subset   -- None (both), 'layouts', or 'assets'
-    files    -- optional list of specific relative paths to pull; when given,
-                only those files are fetched (subset/reset are ignored)
-    dry_run  -- show what would be written, but don't write
-    reset    -- if True, also remove local files absent from the server
-    out      -- Output instance for printing
-
-    Returns (succeeded, failed) where each is a list of relative paths.
+    subset: None (both), 'layouts' or 'assets'.
+    files: pull only these relative paths; subset and reset are ignored.
+    reset: also remove local .tpl files absent from the server.
+    Returns (succeeded, failed).
     """
     succeeded = []
     failed = []
@@ -165,12 +152,7 @@ def _remove_orphaned_layouts(site_dir, keep_paths, out):
 # ------------------------------------------------------------------
 
 def _pull_assets(api, site_dir, dry_run, out):
-    """
-    Pull design assets (CSS, JS, images, fonts) from the Voog API.
-
-    Text assets (stylesheet, javascript): fetched individually for their
-    'data' field, written as UTF-8.
-    Binary assets (image, font, svg, etc.): downloaded from public_url.
+    """Pull design assets: text from the 'data' field, binaries from public_url.
 
     Returns (succeeded, failed).
     """
@@ -211,7 +193,6 @@ def _pull_assets(api, site_dir, dry_run, out):
 
     out and out.progress_done()
 
-    # Update manifest with asset entries
     if not dry_run and assets:
         try:
             manifest = _load_or_empty(site_dir)
@@ -229,12 +210,7 @@ def _pull_assets(api, site_dir, dry_run, out):
 # ------------------------------------------------------------------
 
 def _pull_files(api, site_dir, files, dry_run=False, out=None):
-    """
-    Pull only the specified relative file paths from the server.
-
-    Each path is matched against the server's layout/asset list by its
-    computed file path. The matching manifest entry is refreshed (id +
-    updated_at) so a later push doesn't see a false conflict.
+    """Pull only the given relative paths and refresh their manifest entries.
 
     Returns (succeeded, failed).
     """
@@ -244,8 +220,8 @@ def _pull_files(api, site_dir, files, dry_run=False, out=None):
     want_layouts = any(f.startswith(("layouts/", "components/")) for f in files)
     want_assets  = any(not f.startswith(("layouts/", "components/")) for f in files)
 
-    server_layouts = {}  # rel_path -> layout dict
-    server_assets  = {}   # rel_path -> asset dict
+    server_layouts = {}
+    server_assets  = {}
 
     try:
         if want_layouts:
@@ -330,10 +306,7 @@ def _pull_files(api, site_dir, files, dry_run=False, out=None):
 
 
 def _refresh_manifest_entry(manifest, key, rel_path, layouts, assets):
-    """
-    Replace (or append) the manifest entry for rel_path under manifest[key],
-    rebuilt from the API data. Returns True (manifest changed).
-    """
+    """Replace or append the manifest[key] entry for rel_path. Returns True if changed."""
     built = build_from_api(layouts, assets)[key]
     if not built:
         return False

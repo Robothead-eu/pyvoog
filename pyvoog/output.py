@@ -1,8 +1,4 @@
-"""
-output.py — Printing helpers for voog-cli.
-Provides an Output instance that respects --verbose and formats
-progress lines consistently.
-"""
+"""Console output helpers; log/step/step_result print only with --verbose."""
 
 import sys
 
@@ -31,12 +27,7 @@ class Output:
         print(f"  WARN {msg}", file=sys.stderr)
 
     def attention(self, title, lines=None):
-        """Print a prominent, multi-line warning block to stderr.
-
-        Used for things the user must not miss — e.g. a push conflict where
-        the server changed since the last pull. A single WARN line is too
-        easy to scroll past.
-        """
+        """Print a prominent multi-line warning block to stderr (e.g. push conflicts)."""
         bar = "!" * 64
         print(f"\n{bar}", file=sys.stderr)
         print(f"  {title}", file=sys.stderr)
@@ -91,7 +82,7 @@ class Output:
             return
         filled = int(bar_width * current / total)
         bar = "\u2588" * filled + "\u2591" * (bar_width - filled)
-        # Truncate label so the whole line stays under ~80 chars
+        # Keeps the line under ~80 chars.
         max_label = 45
         if len(label) > max_label:
             label = "\u2026" + label[-(max_label - 1):]
